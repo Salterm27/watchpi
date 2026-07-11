@@ -6,24 +6,28 @@
 set -euo pipefail
 REPO=/srv/apps/watchpi
 BRANCH=main
+APPUSER=sebas
 
-cd "$REPO"
-git fetch --quiet origin "$BRANCH"
-LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse "origin/$BRANCH")
+# run git as the repo owner — root running git in a user-owned repo trips
+# git's "dubious ownership" safety check
+GIT() { runuser -u "$APPUSER" -- git -C "$REPO" "$@"; }
+
+GIT fetch --quiet origin "$BRANCH"
+LOCAL=$(GIT rev-parse HEAD)
+REMOTE=$(GIT rev-parse "origin/$BRANCH")
 
 [ "$LOCAL" = "$REMOTE" ] && exit 0   # nothing new — the common case
 
 echo "deploying $LOCAL -> $REMOTE"
-git reset --hard "origin/$BRANCH"
-chown -R sebas:sebas "$REPO"
+GIT reset --hard "origin/$BRANCH"
 
 # deps (no-op when requirements.txt unchanged)
-sudo -u sebas "$REPO/venv/bin/pip" install -q -r requirements.txt
+runuser -u "$APPUSER" -- "$REPO/venv/bin/pip" install -q -r "$REPO/requirements.txt"
 
 # refresh systemd units if the repo's copies changed
 cp "$REPO/deploy/watchpi.service" /etc/systemd/system/
+chmod +x "$REPO/deploy/autodeploy.sh"   # web uploads drop the exec bit
 systemctl daemon-reload
 systemctl restart watchpi
 
-echo "deployed $(git log -1 --oneline)"
+echo "deployed $(GIT log -1 --oneline)"
