@@ -33,14 +33,16 @@ watchpi/
 ## Install on the Pi
 
 ```bash
-sudo mkdir -p /srv/apps/watchpi
-sudo chown pi:pi /srv/apps/watchpi
-# copy app.py, requirements.txt, static/ into /srv/apps/watchpi/
+sudo mkdir -p /srv/apps
+sudo chown $USER /srv/apps
+cd /srv/apps                       # IMPORTANT: absolute path, not ~/srv
+git clone https://github.com/Salterm27/watchpi.git
+cd watchpi
 
-cd /srv/apps/watchpi
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 
+# edit deploy/watchpi.service if your username isn't sebas (User= line)
 sudo cp deploy/watchpi.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now watchpi
@@ -55,7 +57,8 @@ Open `http://<pi-hostname>:8001` (or route `/watchpi/*` through Caddy later).
    or the v4 "API Read Access Token" works).
 2. Open the app, the settings sheet appears — paste the key and set your
    2-letter region (e.g. `AR`, `US`, `ES`) for streaming availability.
-   The key lives only in your browser's localStorage.
+   Config is saved on the Pi (`data/config.json`), so every device on your
+   network shares it — you only enter it once.
 3. On your phone: "Add to Home Screen" to get an app-like launcher.
 
 ## Backups
