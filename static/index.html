@@ -92,6 +92,35 @@
   .empty { text-align: center; color: var(--muted); padding: 48px 16px; }
   .empty .big { font-size: 40px; margin-bottom: 10px; }
 
+  /* folder chips */
+  .chips { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 10px;
+    margin-bottom: 12px; scrollbar-width: none; }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip {
+    flex-shrink: 0; background: var(--panel); border: 1px solid #2a3040;
+    color: var(--muted); border-radius: 18px; padding: 7px 14px; font-size: 13px;
+    font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  .chip.active { background: var(--accent); border-color: var(--accent); color: #111; }
+  .chip.new { border-style: dashed; }
+
+  /* feed */
+  .feed-item { display: flex; gap: 12px; align-items: center; padding: 12px 0;
+    border-bottom: 1px solid #232838; cursor: pointer; }
+  .feed-item img, .feed-item .noposter { width: 46px; aspect-ratio: 2/3;
+    object-fit: cover; border-radius: 8px; background: var(--panel2); flex-shrink: 0; }
+  .feed-item .what { flex: 1; font-size: 14.5px; }
+  .feed-item .what b { color: var(--accent); font-weight: 600; }
+  .feed-item .when { font-size: 12px; color: var(--muted); flex-shrink: 0; }
+
+  /* new episodes banner */
+  .newband {
+    background: linear-gradient(90deg, #2a2410, #1f2430); border: 1px solid #4a3f18;
+    border-radius: var(--radius); padding: 12px 14px; margin-bottom: 14px;
+    font-size: 14px; cursor: pointer;
+  }
+  .newband b { color: var(--accent); }
+
   /* detail sheet */
   .sheet-backdrop {
     position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 20;
@@ -204,6 +233,7 @@
 
 <nav>
   <button id="tab-library" class="active" onclick="showTab('library')"><span class="ico">🗂</span>Library</button>
+  <button id="tab-feed" onclick="showTab('feed')"><span class="ico">👀</span>Feed</button>
   <button id="tab-search" onclick="showTab('search')"><span class="ico">🔍</span>Search</button>
 </nav>
 
@@ -245,6 +275,9 @@ let library = [];            // items from the Pi
 let libIndex = {};           // `${media_type}:${tmdb_id}` -> item
 let detailCache = {};        // tmdb detail responses (per session)
 let seasonCache = {};        // `${tmdbId}:${season}` -> episodes
+let FOLDERS = [];            // folders visible to the current user
+let currentFolder = null;    // null = All
+let NEW_EPISODES = [];       // shows with episodes aired since last open
 
 /* ============================================================ helpers */
 function el(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
@@ -255,6 +288,14 @@ function toast(msg) {
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2600);
 }
 function year(d) { return d ? d.slice(0, 4) : ''; }
+function ago(iso) {
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 90) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  if (s < 86400) return Math.round(s / 3600) + 'h ago';
+  if (s < 86400 * 7) return Math.round(s / 86400) + 'd ago';
+  return new Date(iso).toLocaleDateString();
+}
 
 /* TMDB — supports both a v3 api key and a v4 read access token */
 async function tmdb(path, params = {}) {
@@ -286,28 +327,66 @@ async function loadLibrary() {
   libIndex = {};
   library.forEach(i => libIndex[`${i.media_type}:${i.tmdb_id}`] = i);
 }
+async function loadFolders() {
+  FOLDERS = USER ? await api(`/folders?${userQ()}`) : [];
+}
 
 /* ============================================================ tabs */
 function showTab(t) {
   tab = t;
-  document.getElementById('tab-library').classList.toggle('active', t === 'library');
-  document.getElementById('tab-search').classList.toggle('active', t === 'search');
-  if (t === 'library') renderLibrary(); else renderSearch();
+  for (const n of ['library', 'feed', 'search'])
+    document.getElementById('tab-' + n).classList.toggle('active', t === n);
+  if (t === 'library') renderLibrary();
+  else if (t === 'feed') renderFeed();
+  else renderSearch();
 }
 
 /* ============================================================ library view */
 async function renderLibrary() {
   const main = document.getElementById('main');
   main.innerHTML = '<div class="spin">Loading…</div>';
-  try { await loadLibrary(); } catch { main.innerHTML = '<div class="empty">Can’t reach the Pi API.</div>'; return; }
+  try { await Promise.all([loadLibrary(), loadFolders()]); }
+  catch { main.innerHTML = '<div class="empty">Can’t reach the Pi API.</div>'; return; }
 
-  if (!library.length) {
-    main.innerHTML = `<div class="empty"><div class="big">🎬</div>
-      Your library is empty.<br>Search for a show or movie to add it.</div>`;
+  main.innerHTML = '';
+
+  /* new-episodes banner */
+  if (NEW_EPISODES.length) {
+    const band = el(`<div class="newband">🔔 <b>New episodes</b> since you last opened:
+      ${esc(NEW_EPISODES.map(n => n.text).join(' · '))} <span style="color:var(--muted)">(tap to dismiss)</span></div>`);
+    band.onclick = () => { NEW_EPISODES = []; band.remove(); };
+    main.appendChild(band);
+  }
+
+  /* folder chips */
+  if (currentFolder && !FOLDERS.find(f => f.id === currentFolder)) currentFolder = null;
+  const chips = el('<div class="chips"></div>');
+  const allChip = el(`<button class="chip ${currentFolder === null ? 'active' : ''}">All</button>`);
+  allChip.onclick = () => { currentFolder = null; renderLibrary(); };
+  chips.appendChild(allChip);
+  for (const f of FOLDERS) {
+    const c = el(`<button class="chip ${currentFolder === f.id ? 'active' : ''}">${f.shared ? '👥 ' : ''}${esc(f.name)}</button>`);
+    c.onclick = () => { currentFolder = f.id; renderLibrary(); };
+    chips.appendChild(c);
+  }
+  const newChip = el('<button class="chip new">＋ Folders</button>');
+  newChip.onclick = openFolderManager;
+  chips.appendChild(newChip);
+  main.appendChild(chips);
+
+  const visible = currentFolder === null
+    ? library
+    : library.filter(i => (i.folders || []).includes(currentFolder));
+
+  if (!visible.length) {
+    main.appendChild(el(`<div class="empty"><div class="big">🎬</div>
+      ${currentFolder === null
+        ? 'Your library is empty.<br>Search for a show or movie to add it.'
+        : 'This folder is empty.<br>Open a title and add it from there.'}</div>`));
     return;
   }
   const grid = el('<div class="grid"></div>');
-  for (const item of library) {
+  for (const item of visible) {
     const card = el(`<div class="card">
       ${item.poster_path
         ? `<img loading="lazy" src="${IMG}w185${item.poster_path}" alt="">`
@@ -326,8 +405,89 @@ async function renderLibrary() {
     card.onclick = () => openDetail(item.media_type, item.tmdb_id, item.title);
     grid.appendChild(card);
   }
-  main.innerHTML = '';
   main.appendChild(grid);
+}
+
+/* ============================================================ feed view */
+async function renderFeed() {
+  const main = document.getElementById('main');
+  main.innerHTML = '<div class="spin">Loading…</div>';
+  let events;
+  try { events = await api(`/feed?${userQ()}`); }
+  catch { main.innerHTML = '<div class="empty">Can’t reach the Pi API.</div>'; return; }
+
+  if (!events.length) {
+    main.innerHTML = `<div class="empty"><div class="big">👀</div>
+      Nothing yet — this shows what others<br>have been watching.</div>`;
+    return;
+  }
+  main.innerHTML = '';
+  const box = el('<div></div>');
+  for (const e of events) {
+    const what = e.kind === 'movie'
+      ? `<b>${esc(e.user_name)}</b> watched ${esc(e.title)}`
+      : `<b>${esc(e.user_name)}</b> watched ${e.n} episode${e.n === 1 ? '' : 's'} of ${esc(e.title)} S${e.season}`;
+    const row = el(`<div class="feed-item">
+      ${e.poster_path ? `<img loading="lazy" src="${IMG}w92${e.poster_path}" alt="">` : '<div class="noposter"></div>'}
+      <div class="what">${what}</div>
+      <div class="when">${esc(ago(e.at))}</div>
+    </div>`);
+    row.onclick = () => openDetail(e.media_type, e.tmdb_id, e.title);
+    box.appendChild(row);
+  }
+  main.appendChild(box);
+}
+
+/* ============================================================ folder manager */
+function openFolderManager() {
+  const bd = document.getElementById('sheet-backdrop');
+  const sheet = document.getElementById('sheet');
+  bd.classList.add('open');
+  sheet.innerHTML = '<div class="grabber"></div>';
+  sheet.appendChild(closeBtn());
+  sheet.appendChild(el('<h2 style="margin-bottom:4px">Folders</h2>'));
+  sheet.appendChild(el('<p class="hint" style="margin-bottom:14px">👥 shared folders are visible to everyone — and watch progress on their items <b>syncs between you</b>. Private folders are yours alone.</p>'));
+
+  const list = el('<div></div>');
+  for (const f of FOLDERS) {
+    const row = el(`<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #232838">
+      <span style="flex:1;font-weight:600">${f.shared ? '👥 ' : '🔒 '}${esc(f.name)}</span>
+      <span class="hint">${f.items} item${f.items === 1 ? '' : 's'}</span>
+      <button class="btn danger" style="padding:5px 10px;font-size:12px">Delete</button>
+    </div>`);
+    row.querySelector('button').onclick = async () => {
+      if (!confirm(`Delete folder “${f.name}”? (Titles stay in the library.)`)) return;
+      try {
+        await api(`/folders/${f.id}?${userQ()}`, { method: 'DELETE' });
+        await loadFolders();
+        openFolderManager();
+      } catch { toast('Could not delete'); }
+    };
+    list.appendChild(row);
+  }
+  if (!FOLDERS.length) list.appendChild(el('<p class="hint">No folders yet.</p>'));
+  sheet.appendChild(list);
+
+  sheet.appendChild(el(`
+    <div class="field" style="margin-top:16px">
+      <label>New folder</label>
+      <input id="nf-name" type="text" maxlength="40" placeholder="e.g. Watching together">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
+        <input id="nf-shared" type="checkbox" style="width:auto"> 👥 Shared (progress syncs between users)
+      </label>
+    </div>
+    <div class="btnrow"><button class="btn primary" id="nf-create">Create</button></div>`));
+  sheet.querySelector('#nf-create').onclick = async () => {
+    const name = sheet.querySelector('#nf-name').value.trim();
+    if (!name) return;
+    try {
+      await api(`/folders?${userQ()}`, { method: 'POST', body: {
+        name, shared: sheet.querySelector('#nf-shared').checked } });
+      await loadFolders();
+      openFolderManager();
+      toast('Folder created');
+    } catch { toast('Could not create folder'); }
+  };
 }
 
 /* ============================================================ search view */
@@ -410,10 +570,11 @@ async function openDetail(mediaType, tmdbId, fallbackTitle) {
     detailCache[ck] = d;
   } catch (e) {
     sheet.innerHTML = '<div class="grabber"></div>';
+    sheet.appendChild(closeBtn());
     const box = el('<div></div>'); sheet.appendChild(box);
     return handleTmdbError(e, box);
   }
-  try { await loadLibrary(); } catch {}
+  try { await Promise.all([loadLibrary(), loadFolders()]); } catch {}
   renderDetail(sheet, mediaType, d, fallbackTitle);
 }
 
@@ -475,6 +636,30 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
       if (tab === 'library') renderLibrary();
     };
     actions.appendChild(rm);
+  }
+
+  /* folders (library items only) */
+  if (item && FOLDERS.length) {
+    sheet.appendChild(el('<h3 class="section">Folders</h3>'));
+    const frow = el('<div class="chips" style="flex-wrap:wrap;overflow:visible"></div>');
+    for (const f of FOLDERS) {
+      const inF = () => (item.folders || []).includes(f.id);
+      const c = el(`<button class="chip ${inF() ? 'active' : ''}">${f.shared ? '👥 ' : ''}${esc(f.name)}</button>`);
+      c.onclick = async () => {
+        const target = !inF();
+        try {
+          await api(`/folders/${f.id}/items?${userQ()}`, { method: 'PUT',
+            body: { item_id: item.id, member: target } });
+          item.folders = target
+            ? [...(item.folders || []), f.id]
+            : (item.folders || []).filter(id => id !== f.id);
+          c.classList.toggle('active', target);
+          if (target && f.shared) toast('In a shared folder — progress now syncs 👥');
+        } catch { toast('Failed to update folder'); }
+      };
+      frow.appendChild(c);
+    }
+    sheet.appendChild(frow);
   }
 
   /* streaming availability */
@@ -646,6 +831,39 @@ function selectUser(u) {
   updateProfileChip();
   closeSheet();
   showTab('library');
+  checkNewEpisodes();
+}
+
+/* ============================================================ new episodes
+   On open: tell the Pi "I'm here", get back when this profile last opened
+   the app, then ask TMDB (browser-side) which followed shows aired episodes
+   since then. */
+async function checkNewEpisodes() {
+  if (!USER || !S.key) return;
+  let prev;
+  try { prev = (await api(`/users/${USER.id}/seen`, { method: 'PUT', body: {} })).previous_open_at; }
+  catch { return; }
+  if (!prev) return;                       // first open — nothing to compare
+  const prevDate = prev.slice(0, 10);
+  try { if (!library.length) await loadLibrary(); } catch { return; }
+  const shows = library.filter(i => i.media_type === 'tv');
+  if (!shows.length) return;
+  const found = [];
+  await Promise.all(shows.map(async s => {
+    try {
+      const ck = `tv:${s.tmdb_id}`;
+      const d = detailCache[ck] || await tmdb(`/tv/${s.tmdb_id}`, { append_to_response: 'watch/providers' });
+      detailCache[ck] = d;
+      const le = d.last_episode_to_air;
+      if (le && le.air_date && le.air_date >= prevDate)
+        found.push({ text: `${s.title} S${le.season_number}E${le.episode_number}` });
+    } catch { /* one failed lookup shouldn't kill the rest */ }
+  }));
+  if (found.length) {
+    NEW_EPISODES = found;
+    toast(`🔔 New episodes: ${found.map(f => f.text).join(', ')}`);
+    if (tab === 'library') renderLibrary();
+  }
 }
 
 /* ============================================================ settings */
@@ -697,6 +915,7 @@ function openSettings() {
   showTab('library');
   if (!S.key) setTimeout(openSettings, 400);
   else if (!USER) setTimeout(() => openProfilePicker(false), 200);
+  else checkNewEpisodes();
 })();
 </script>
 </body>
