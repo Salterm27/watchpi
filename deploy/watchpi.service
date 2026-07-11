@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=pi
+# change if your Pi username differs
+User=sebas
 WorkingDirectory=/srv/apps/watchpi
 Environment=WATCHPI_DB=/srv/apps/watchpi/data/watchpi.db
 Environment=WATCHPI_PORT=8001
@@ -15,7 +16,8 @@ RestartSec=5
 # hardening (cheap on a Pi, worth having)
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/srv/apps/watchpi/data
+# whole app dir writable so data/ can be created on first run
+ReadWritePaths=/srv/apps/watchpi
 PrivateTmp=true
 
 [Install]
