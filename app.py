@@ -56,6 +56,15 @@ CREATE TABLE IF NOT EXISTS movie_watches (
     PRIMARY KEY (item_id, user_id)
 );
 
+-- Per-user "stopped watching": greys the title out and mutes new-episode
+-- alerts for that user only.
+CREATE TABLE IF NOT EXISTS stopped (
+    item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    stopped_at TEXT    NOT NULL,
+    PRIMARY KEY (item_id, user_id)
+);
+
 -- Folders organize the library. owner_id NULL = shared folder (visible to
 -- everyone); items in a shared folder get SYNCED watch progress.
 CREATE TABLE IF NOT EXISTS folders (
@@ -112,7 +121,7 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def item_to_dict(row, watched=False, ep_count=0):
+def item_to_dict(row, watched=False, ep_count=0, stopped=False):
     return {
         "id": row["id"],
         "tmdb_id": row["tmdb_id"],
@@ -122,6 +131,7 @@ def item_to_dict(row, watched=False, ep_count=0):
         "added_at": row["added_at"],
         "watched": bool(watched),
         "watched_episodes": ep_count,
+        "stopped": bool(stopped),
     }
 
 
@@ -199,7 +209,9 @@ def list_library():
              (SELECT COUNT(*) FROM episodes e
                WHERE e.item_id = i.id AND e.user_id = :u)          AS ep_count,
              EXISTS(SELECT 1 FROM movie_watches m
-               WHERE m.item_id = i.id AND m.user_id = :u)          AS w
+               WHERE m.item_id = i.id AND m.user_id = :u)          AS w,
+             EXISTS(SELECT 1 FROM stopped s
+               WHERE s.item_id = i.id AND s.user_id = :u)          AS st
            FROM items i ORDER BY i.added_at DESC""",
         {"u": user["id"]},
     ).fetchall()
@@ -213,10 +225,19 @@ def list_library():
     by_item = {}
     for m in memberships:
         by_item.setdefault(m["item_id"], []).append(m["folder_id"])
+    # optional: full per-item episode lists in one call (?include=episodes)
+    eps_by_item = {}
+    if request.args.get("include") == "episodes":
+        for e in db.execute(
+            "SELECT item_id, season, episode FROM episodes WHERE user_id=?", (user["id"],)
+        ).fetchall():
+            eps_by_item.setdefault(e["item_id"], []).append([e["season"], e["episode"]])
     out = []
     for r in rows:
-        d = item_to_dict(r, r["w"], r["ep_count"])
+        d = item_to_dict(r, r["w"], r["ep_count"], r["st"])
         d["folders"] = by_item.get(r["id"], [])
+        if request.args.get("include") == "episodes":
+            d["episodes"] = eps_by_item.get(r["id"], [])
         out.append(d)
     return jsonify(out)
 
@@ -261,31 +282,51 @@ def delete_item(item_id):
 
 @app.patch("/api/library/<int:item_id>")
 def update_item(item_id):
-    """Set per-user watched flag (movies). Requires ?user=<id>."""
+    """Per-user flags. Requires ?user=<id>.
+    Body: {"watched": bool} (movies, syncs in shared folders)
+          and/or {"stopped": bool} (always personal — mutes alerts, greys out).
+    """
     user = current_user()
     if user is None:
         return jsonify(error="valid ?user=<id> is required"), 400
     data = request.get_json(silent=True) or {}
-    if "watched" not in data:
-        return jsonify(error="watched (bool) is required"), 400
+    if "watched" not in data and "stopped" not in data:
+        return jsonify(error="watched (bool) and/or stopped (bool) is required"), 400
     db = get_db()
     row = db.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
     if not row:
         return jsonify(error="not found"), 404
-    # items in a shared folder sync watch state to every user
-    uids = all_user_ids(db) if item_is_synced(db, item_id) else [user["id"]]
-    if data["watched"]:
-        db.executemany(
-            "INSERT OR IGNORE INTO movie_watches (item_id, user_id, watched_at) VALUES (?,?,?)",
-            [(item_id, u, now()) for u in uids],
-        )
-    else:
-        db.executemany(
-            "DELETE FROM movie_watches WHERE item_id=? AND user_id=?",
-            [(item_id, u) for u in uids],
-        )
+    if "watched" in data:
+        # items in a shared folder sync watch state to every user
+        uids = all_user_ids(db) if item_is_synced(db, item_id) else [user["id"]]
+        if data["watched"]:
+            db.executemany(
+                "INSERT OR IGNORE INTO movie_watches (item_id, user_id, watched_at) VALUES (?,?,?)",
+                [(item_id, u, now()) for u in uids],
+            )
+        else:
+            db.executemany(
+                "DELETE FROM movie_watches WHERE item_id=? AND user_id=?",
+                [(item_id, u) for u in uids],
+            )
+    if "stopped" in data:
+        if data["stopped"]:
+            db.execute(
+                "INSERT OR IGNORE INTO stopped (item_id, user_id, stopped_at) VALUES (?,?,?)",
+                (item_id, user["id"], now()),
+            )
+        else:
+            db.execute(
+                "DELETE FROM stopped WHERE item_id=? AND user_id=?", (item_id, user["id"])
+            )
     db.commit()
-    return jsonify(item_to_dict(row, data["watched"]))
+    w = db.execute(
+        "SELECT 1 FROM movie_watches WHERE item_id=? AND user_id=?", (item_id, user["id"])
+    ).fetchone() is not None
+    st = db.execute(
+        "SELECT 1 FROM stopped WHERE item_id=? AND user_id=?", (item_id, user["id"])
+    ).fetchone() is not None
+    return jsonify(item_to_dict(row, w, 0, st))
 
 
 # ---------------------------------------------------------------- episodes
