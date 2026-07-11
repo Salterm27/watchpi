@@ -55,6 +55,21 @@ CREATE TABLE IF NOT EXISTS movie_watches (
     watched_at TEXT    NOT NULL,
     PRIMARY KEY (item_id, user_id)
 );
+
+-- Folders organize the library. owner_id NULL = shared folder (visible to
+-- everyone); items in a shared folder get SYNCED watch progress.
+CREATE TABLE IF NOT EXISTS folders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL,
+    owner_id   INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS folder_items (
+    folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    item_id   INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    PRIMARY KEY (folder_id, item_id)
+);
 """
 
 
@@ -84,6 +99,11 @@ def init_db():
         os.replace(DB_PATH, DB_PATH + ".v1.bak")
         con = sqlite3.connect(DB_PATH)
     con.executescript(SCHEMA)
+    # v3 migration: track when each user last opened the app
+    try:
+        con.execute("ALTER TABLE users ADD COLUMN last_open_at TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     con.commit()
     con.close()
 
@@ -111,6 +131,19 @@ def current_user():
     if not uid.isdigit():
         return None
     return get_db().execute("SELECT * FROM users WHERE id=?", (int(uid),)).fetchone()
+
+
+def item_is_synced(db, item_id):
+    """True if the item sits in any shared folder → watch progress syncs to everyone."""
+    return db.execute(
+        """SELECT 1 FROM folder_items fi JOIN folders f ON f.id = fi.folder_id
+           WHERE fi.item_id = ? AND f.owner_id IS NULL LIMIT 1""",
+        (item_id,),
+    ).fetchone() is not None
+
+
+def all_user_ids(db):
+    return [r["id"] for r in db.execute("SELECT id FROM users").fetchall()]
 
 
 # ---------------------------------------------------------------- users
@@ -170,7 +203,22 @@ def list_library():
            FROM items i ORDER BY i.added_at DESC""",
         {"u": user["id"]},
     ).fetchall()
-    return jsonify([item_to_dict(r, r["w"], r["ep_count"]) for r in rows])
+    # folder memberships (only folders this user can see: shared or their own)
+    memberships = db.execute(
+        """SELECT fi.item_id, fi.folder_id FROM folder_items fi
+           JOIN folders f ON f.id = fi.folder_id
+           WHERE f.owner_id IS NULL OR f.owner_id = ?""",
+        (user["id"],),
+    ).fetchall()
+    by_item = {}
+    for m in memberships:
+        by_item.setdefault(m["item_id"], []).append(m["folder_id"])
+    out = []
+    for r in rows:
+        d = item_to_dict(r, r["w"], r["ep_count"])
+        d["folders"] = by_item.get(r["id"], [])
+        out.append(d)
+    return jsonify(out)
 
 
 @app.post("/api/library")
@@ -224,14 +272,17 @@ def update_item(item_id):
     row = db.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
     if not row:
         return jsonify(error="not found"), 404
+    # items in a shared folder sync watch state to every user
+    uids = all_user_ids(db) if item_is_synced(db, item_id) else [user["id"]]
     if data["watched"]:
-        db.execute(
+        db.executemany(
             "INSERT OR IGNORE INTO movie_watches (item_id, user_id, watched_at) VALUES (?,?,?)",
-            (item_id, user["id"], now()),
+            [(item_id, u, now()) for u in uids],
         )
     else:
-        db.execute(
-            "DELETE FROM movie_watches WHERE item_id=? AND user_id=?", (item_id, user["id"])
+        db.executemany(
+            "DELETE FROM movie_watches WHERE item_id=? AND user_id=?",
+            [(item_id, u) for u in uids],
         )
     db.commit()
     return jsonify(item_to_dict(row, data["watched"]))
@@ -281,21 +332,166 @@ def set_episodes(item_id):
 
     ts = now()
     uid = user["id"]
+    # items in a shared folder sync watch state to every user
+    uids = all_user_ids(db) if item_is_synced(db, item_id) else [uid]
     if watched:
         db.executemany(
             "INSERT OR IGNORE INTO episodes (item_id, user_id, season, episode, watched_at) VALUES (?,?,?,?,?)",
-            [(item_id, uid, s, e, ts) for s, e in pairs],
+            [(item_id, u, s, e, ts) for u in uids for s, e in pairs],
         )
     else:
         db.executemany(
             "DELETE FROM episodes WHERE item_id=? AND user_id=? AND season=? AND episode=?",
-            [(item_id, uid, s, e) for s, e in pairs],
+            [(item_id, u, s, e) for u in uids for s, e in pairs],
         )
     db.commit()
     count = db.execute(
         "SELECT COUNT(*) AS c FROM episodes WHERE item_id=? AND user_id=?", (item_id, uid)
     ).fetchone()["c"]
-    return jsonify(ok=True, watched_episodes=count)
+    return jsonify(ok=True, watched_episodes=count, synced=len(uids) > 1)
+
+
+# ---------------------------------------------------------------- folders
+
+@app.get("/api/folders")
+def list_folders():
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    rows = get_db().execute(
+        """SELECT f.id, f.name, f.owner_id,
+                  (SELECT COUNT(*) FROM folder_items fi WHERE fi.folder_id = f.id) AS items
+           FROM folders f
+           WHERE f.owner_id IS NULL OR f.owner_id = ?
+           ORDER BY f.owner_id IS NOT NULL, f.name""",
+        (user["id"],),
+    ).fetchall()
+    return jsonify([
+        {"id": r["id"], "name": r["name"], "shared": r["owner_id"] is None, "items": r["items"]}
+        for r in rows
+    ])
+
+
+@app.post("/api/folders")
+def add_folder():
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+    if not name or len(name) > 40:
+        return jsonify(error="name is required (max 40 chars)"), 400
+    shared = bool(data.get("shared"))
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO folders (name, owner_id, created_at) VALUES (?,?,?)",
+        (name, None if shared else user["id"], now()),
+    )
+    db.commit()
+    return jsonify(id=cur.lastrowid, name=name, shared=shared, items=0), 201
+
+
+@app.delete("/api/folders/<int:folder_id>")
+def delete_folder(folder_id):
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    db = get_db()
+    row = db.execute("SELECT * FROM folders WHERE id=?", (folder_id,)).fetchone()
+    if not row:
+        return jsonify(error="not found"), 404
+    if row["owner_id"] is not None and row["owner_id"] != user["id"]:
+        return jsonify(error="not your folder"), 403
+    db.execute("DELETE FROM folders WHERE id=?", (folder_id,))
+    db.commit()
+    return "", 204
+
+
+@app.put("/api/folders/<int:folder_id>/items")
+def set_folder_item(folder_id):
+    """Body: {"item_id": N, "member": true|false}"""
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    data = request.get_json(silent=True) or {}
+    item_id = data.get("item_id")
+    member = data.get("member")
+    if not isinstance(item_id, int) or not isinstance(member, bool):
+        return jsonify(error="item_id (int) and member (bool) are required"), 400
+    db = get_db()
+    folder = db.execute("SELECT * FROM folders WHERE id=?", (folder_id,)).fetchone()
+    if not folder or not db.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone():
+        return jsonify(error="not found"), 404
+    if folder["owner_id"] is not None and folder["owner_id"] != user["id"]:
+        return jsonify(error="not your folder"), 403
+    if member:
+        db.execute(
+            "INSERT OR IGNORE INTO folder_items (folder_id, item_id) VALUES (?,?)",
+            (folder_id, item_id),
+        )
+    else:
+        db.execute(
+            "DELETE FROM folder_items WHERE folder_id=? AND item_id=?", (folder_id, item_id)
+        )
+    db.commit()
+    return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------- feed
+
+@app.get("/api/feed")
+def feed():
+    """Recent watch activity by OTHER users, newest first. Episode marks are
+    grouped per user+show+season+day."""
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    db = get_db()
+    events = []
+    ep_rows = db.execute(
+        """SELECT u.name AS user_name, i.id AS item_id, i.tmdb_id, i.media_type,
+                  i.title, i.poster_path, e.season,
+                  COUNT(*) AS n, MAX(e.watched_at) AS at
+           FROM episodes e
+           JOIN users u ON u.id = e.user_id
+           JOIN items i ON i.id = e.item_id
+           WHERE e.user_id != ?
+           GROUP BY e.user_id, e.item_id, e.season, DATE(e.watched_at)
+           ORDER BY at DESC LIMIT 50""",
+        (user["id"],),
+    ).fetchall()
+    for r in ep_rows:
+        events.append({**dict(r), "kind": "episodes"})
+    mv_rows = db.execute(
+        """SELECT u.name AS user_name, i.id AS item_id, i.tmdb_id, i.media_type,
+                  i.title, i.poster_path, m.watched_at AS at
+           FROM movie_watches m
+           JOIN users u ON u.id = m.user_id
+           JOIN items i ON i.id = m.item_id
+           WHERE m.user_id != ?
+           ORDER BY m.watched_at DESC LIMIT 50""",
+        (user["id"],),
+    ).fetchall()
+    for r in mv_rows:
+        events.append({**dict(r), "kind": "movie"})
+    events.sort(key=lambda e: e["at"], reverse=True)
+    return jsonify(events[:50])
+
+
+# ---------------------------------------------------------------- last open
+
+@app.put("/api/users/<int:user_id>/seen")
+def mark_seen(user_id):
+    """Record 'user opened the app now'; returns the PREVIOUS open time so the
+    client can check TMDB for episodes aired since then."""
+    db = get_db()
+    row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row:
+        return jsonify(error="not found"), 404
+    prev = row["last_open_at"]
+    db.execute("UPDATE users SET last_open_at=? WHERE id=?", (now(), user_id))
+    db.commit()
+    return jsonify(previous_open_at=prev)
 
 
 # ---------------------------------------------------------------- config

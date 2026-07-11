@@ -96,6 +96,26 @@ movie watched flags) is per profile. The app shows a "Who's watching?" picker
 on first launch; the chosen profile is remembered per device. Switch anytime
 via the name chip in the header.
 
+## Folders
+
+Organize the library with folders (chips at the top of the Library tab).
+Private folders (🔒) are visible only to their owner. Shared folders (👥) are
+visible to everyone — and watch progress on their items **syncs between all
+profiles** (mark it watched, it's watched for both of you). Add/remove a title
+from folders inside its detail sheet.
+
+## Feed
+
+The Feed tab shows what other profiles have been watching, newest first,
+grouped per show/season/day ("Vale watched 3 episodes of Severance S1 · 2h ago").
+Derived from watch timestamps — no extra tracking.
+
+## New-episode alerts
+
+On open, the app records the visit and asks TMDB (browser-side, as always)
+whether any followed show aired episodes since your previous visit. If so, a
+banner lists them at the top of the library.
+
 ## Auto-deploy (CI/CD)
 
 The Pi polls GitHub every 10 minutes and deploys `main` automatically:
@@ -130,6 +150,12 @@ Endpoints marked (u) require `?user=<profile id>`.
 | DELETE | /api/library/:id                  | —                                                 |
 | GET    | /api/library/:id/episodes (u)     | —                                                 |
 | PUT    | /api/library/:id/episodes (u)     | `{episodes: [{season, episode}], watched: bool}`  |
+| GET    | /api/folders (u)                  | —                                                 |
+| POST   | /api/folders (u)                  | `{name, shared: bool}`                            |
+| DELETE | /api/folders/:id (u)              | —                                                 |
+| PUT    | /api/folders/:id/items (u)        | `{item_id, member: bool}`                         |
+| GET    | /api/feed (u)                     | —                                                 |
+| PUT    | /api/users/:id/seen               | `{}` → returns previous open time                 |
 | GET    | /api/config                       | —                                                 |
 | PUT    | /api/config                       | `{tmdb_key?, region?}`                            |
 | GET    | /api/health                       | —                                                 |
