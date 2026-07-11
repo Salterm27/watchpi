@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly restic backup of /srv/apps
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/srv/apps/backup.sh
+Nice=10
+IOSchedulingClass=idle

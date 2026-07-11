@@ -1,0 +1,22 @@
+[Unit]
+Description=WatchPi - personal watch tracker
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/srv/apps/watchpi
+Environment=WATCHPI_DB=/srv/apps/watchpi/data/watchpi.db
+Environment=WATCHPI_PORT=8001
+ExecStart=/srv/apps/watchpi/venv/bin/python /srv/apps/watchpi/app.py
+Restart=on-failure
+RestartSec=5
+
+# hardening (cheap on a Pi, worth having)
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/srv/apps/watchpi/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
