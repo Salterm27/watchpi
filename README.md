@@ -89,14 +89,47 @@ restic snapshots
 restic restore latest --target /tmp/restore-test
 ```
 
+## Profiles
+
+The library is shared between everyone; watch progress (episode checkmarks,
+movie watched flags) is per profile. The app shows a "Who's watching?" picker
+on first launch; the chosen profile is remembered per device. Switch anytime
+via the name chip in the header.
+
+## Auto-deploy (CI/CD)
+
+The Pi polls GitHub every 10 minutes and deploys `main` automatically:
+new commits → `git reset --hard` → pip install → service restart.
+One-time setup on the Pi:
+
+```bash
+chmod +x /srv/apps/watchpi/deploy/autodeploy.sh
+sudo cp deploy/watchpi-deploy.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now watchpi-deploy.timer
+sudo systemctl start watchpi-deploy.service     # run once now to test
+journalctl -u watchpi-deploy -n 20              # see what it did
+```
+
+Anything merged to `main` is live at home within ~10 minutes. Local changes
+on the Pi get overwritten by the next deploy — treat the GitHub repo as the
+only source of truth.
+
 ## API (for your launcher app or future scripts)
 
-| Method | Path                          | Body                                              |
-|--------|-------------------------------|---------------------------------------------------|
-| GET    | /api/library                  | —                                                 |
-| POST   | /api/library                  | `{tmdb_id, media_type, title, poster_path}`       |
-| PATCH  | /api/library/:id              | `{watched: bool}` (movies)                        |
-| DELETE | /api/library/:id              | —                                                 |
-| GET    | /api/library/:id/episodes     | —                                                 |
-| PUT    | /api/library/:id/episodes     | `{episodes: [{season, episode}], watched: bool}`  |
-| GET    | /api/health                   | —                                                 |
+Endpoints marked (u) require `?user=<profile id>`.
+
+| Method | Path                              | Body                                              |
+|--------|-----------------------------------|---------------------------------------------------|
+| GET    | /api/users                        | —                                                 |
+| POST   | /api/users                        | `{name}`                                          |
+| DELETE | /api/users/:id                    | —                                                 |
+| GET    | /api/library (u)                  | —                                                 |
+| POST   | /api/library                      | `{tmdb_id, media_type, title, poster_path}`       |
+| PATCH  | /api/library/:id (u)              | `{watched: bool}` (movies)                        |
+| DELETE | /api/library/:id                  | —                                                 |
+| GET    | /api/library/:id/episodes (u)     | —                                                 |
+| PUT    | /api/library/:id/episodes (u)     | `{episodes: [{season, episode}], watched: bool}`  |
+| GET    | /api/config                       | —                                                 |
+| PUT    | /api/config                       | `{tmdb_key?, region?}`                            |
+| GET    | /api/health                       | —                                                 |
