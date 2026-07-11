@@ -104,6 +104,12 @@
     padding: 20px 16px calc(24px + env(safe-area-inset-bottom));
   }
   .sheet .grabber { width: 40px; height: 4px; background: #3a4152; border-radius: 2px; margin: 0 auto 16px; }
+  .sheet-close {
+    position: sticky; top: 0; float: right; z-index: 5;
+    background: var(--panel2); border: 1px solid #333b4d; color: var(--muted);
+    width: 34px; height: 34px; border-radius: 50%; font-size: 15px;
+    cursor: pointer; margin: -6px 0 0 8px;
+  }
   .detail-head { display: flex; gap: 14px; }
   .detail-head img, .detail-head .noposter {
     width: 110px; aspect-ratio: 2/3; object-fit: cover; border-radius: var(--radius);
@@ -383,12 +389,19 @@ function handleTmdbError(e, box) {
 
 /* ============================================================ detail sheet */
 function closeSheet() { document.getElementById('sheet-backdrop').classList.remove('open'); }
+function closeBtn() {
+  const b = el('<button class="sheet-close" title="Close">✕</button>');
+  b.onclick = closeSheet;
+  return b;
+}
 
 async function openDetail(mediaType, tmdbId, fallbackTitle) {
   const bd = document.getElementById('sheet-backdrop');
   const sheet = document.getElementById('sheet');
   bd.classList.add('open');
-  sheet.innerHTML = '<div class="grabber"></div><div class="spin">Loading…</div>';
+  sheet.innerHTML = '<div class="grabber"></div>';
+  sheet.appendChild(closeBtn());
+  sheet.appendChild(el('<div class="spin">Loading…</div>'));
 
   let d;
   const ck = `${mediaType}:${tmdbId}`;
@@ -415,6 +428,7 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
   ].filter(Boolean).join(' · ');
 
   sheet.innerHTML = '<div class="grabber"></div>';
+  sheet.appendChild(closeBtn());
   sheet.appendChild(el(`<div class="detail-head">
     ${d.poster_path ? `<img src="${IMG}w342${d.poster_path}" alt="">` : '<div class="noposter"></div>'}
     <div>
@@ -605,6 +619,7 @@ function openProfilePicker(closable = true) {
         <button class="btn primary" id="add-profile">Add</button>
       </div>
     </div>`;
+  if (closable) sheet.prepend(closeBtn());
   const list = sheet.querySelector('#profile-list');
   for (const u of USERS) {
     const b = el(`<button class="profile-btn ${USER && USER.id === u.id ? 'active' : ''}">${esc(u.name)}</button>`);
@@ -658,6 +673,7 @@ function openSettings() {
       <button class="btn primary" id="set-save">Save</button>
       <button class="btn" onclick="closeSheet()">Cancel</button>
     </div>`;
+  sheet.prepend(closeBtn());
   document.getElementById('set-save').onclick = async () => {
     const btn = document.getElementById('set-save');
     btn.disabled = true;
