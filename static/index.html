@@ -86,6 +86,9 @@
     border-radius: 20px; text-transform: uppercase;
   }
   .badge.done { color: var(--green); }
+  .badge.paused { color: var(--muted); }
+  .card.paused img, .card.paused .noposter { filter: grayscale(1); opacity: .5; }
+  .card.paused .title { color: var(--muted); }
   .progressbar { height: 4px; background: #2a3040; border-radius: 2px; margin-top: 5px; overflow: hidden; }
   .progressbar div { height: 100%; background: var(--green); border-radius: 2px; }
 
@@ -323,9 +326,22 @@ async function api(path, opts = {}) {
 }
 
 async function loadLibrary() {
-  library = USER ? await api(`/library?${userQ()}`) : [];
+  library = USER ? await api(`/library?${userQ()}&include=episodes`) : [];
   libIndex = {};
   library.forEach(i => libIndex[`${i.media_type}:${i.tmdb_id}`] = i);
+}
+
+/* first unwatched episode across seasons, or null if caught up */
+function computeNextUp(d, watchedSet) {
+  const seasons = (d.seasons || []).filter(s => s.season_number > 0)
+    .sort((a, b) => a.season_number - b.season_number);
+  for (const s of seasons)
+    for (let e = 1; e <= (s.episode_count || 0); e++)
+      if (!watchedSet.has(`${s.season_number}:${e}`)) return { s: s.season_number, e };
+  return null;
+}
+function watchedSetOf(item) {
+  return new Set((item.episodes || []).map(([s, e]) => `${s}:${e}`));
 }
 async function loadFolders() {
   FOLDERS = USER ? await api(`/folders?${userQ()}`) : [];
@@ -387,25 +403,52 @@ async function renderLibrary() {
   }
   const grid = el('<div class="grid"></div>');
   for (const item of visible) {
-    const card = el(`<div class="card">
+    const card = el(`<div class="card ${item.stopped ? 'paused' : ''}">
       ${item.poster_path
         ? `<img loading="lazy" src="${IMG}w185${item.poster_path}" alt="">`
         : `<div class="noposter">${esc(item.title)}</div>`}
       <div class="title">${esc(item.title)}</div>
+      <div class="progressbar" style="display:none"><div></div></div>
       <div class="sub"></div>
     </div>`);
     const sub = card.querySelector('.sub');
     if (item.media_type === 'movie') {
       if (item.watched) card.prepend(el('<span class="badge done">✓ seen</span>'));
       sub.textContent = 'Movie';
+    } else if (item.stopped) {
+      card.prepend(el('<span class="badge paused">⏸ paused</span>'));
+      sub.textContent = 'Stopped watching';
     } else {
       sub.textContent = item.watched_episodes ? `${item.watched_episodes} ep watched` : 'TV show';
       card.prepend(el('<span class="badge">TV</span>'));
+      enrichCard(item, card);   // async: next-up + progress once TMDB answers
     }
     card.onclick = () => openDetail(item.media_type, item.tmdb_id, item.title);
     grid.appendChild(card);
   }
   main.appendChild(grid);
+}
+
+/* upgrade a TV card with "Next: SxEy" + progress toward the show total */
+async function enrichCard(item, card) {
+  try {
+    const ck = `tv:${item.tmdb_id}`;
+    const d = detailCache[ck] || await tmdb(`/tv/${item.tmdb_id}`, { append_to_response: 'watch/providers' });
+    detailCache[ck] = d;
+    const next = computeNextUp(d, watchedSetOf(item));
+    const total = d.number_of_episodes || 0;
+    const sub = card.querySelector('.sub');
+    let txt = next ? `Next: S${next.s}E${next.e}` : 'Caught up ✓';
+    if (total) txt += ` · ${item.watched_episodes}/${total}`;
+    sub.textContent = txt;
+    if (!next) sub.style.color = 'var(--green)';
+    if (total && item.watched_episodes) {
+      const bar = card.querySelector('.progressbar');
+      bar.style.display = 'block';
+      bar.firstElementChild.style.width =
+        Math.min(100, Math.round(100 * item.watched_episodes / total)) + '%';
+    }
+  } catch { /* no key / offline — card keeps its basic label */ }
 }
 
 /* ============================================================ feed view */
@@ -590,11 +633,20 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
 
   sheet.innerHTML = '<div class="grabber"></div>';
   sheet.appendChild(closeBtn());
+  /* next-up line for tv shows in the library */
+  let nextupHtml = '';
+  if (mediaType === 'tv' && item && !item.stopped) {
+    const next = computeNextUp(d, watchedSetOf(item));
+    nextupHtml = next
+      ? `<div class="meta" style="color:var(--accent);font-weight:600">▶ Next up: S${next.s}E${next.e}</div>`
+      : `<div class="meta" style="color:var(--green);font-weight:600">✓ Caught up</div>`;
+  }
   sheet.appendChild(el(`<div class="detail-head">
     ${d.poster_path ? `<img src="${IMG}w342${d.poster_path}" alt="">` : '<div class="noposter"></div>'}
     <div>
       <h2>${esc(title)}</h2>
       <div class="meta">${esc(meta)}</div>
+      ${nextupHtml}
       <div class="btnrow" id="d-actions"></div>
     </div>
   </div>`));
@@ -626,6 +678,25 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
       };
       actions.appendChild(w);
     }
+    if (mediaType === 'tv') {
+      const stopBtn = el(`<button class="btn">${item.stopped ? '▶ Continue watching' : '⏸ Stop watching'}</button>`);
+      stopBtn.onclick = async () => {
+        const inShared = (item.folders || []).some(id => (FOLDERS.find(f => f.id === id) || {}).shared);
+        if (!item.stopped && inShared &&
+            !confirm(`“${title}” is in a shared folder 👥.\n\nStopping only pauses YOUR alerts and greys it in YOUR library — progress will keep syncing while it stays in the folder.\n\nStop watching?`))
+          return;
+        stopBtn.disabled = true;
+        try {
+          await api(`/library/${item.id}?${userQ()}`, { method: 'PATCH',
+            body: { stopped: !item.stopped } });
+          await loadLibrary();
+          toast(item.stopped ? 'Back on the watchlist' : 'Paused — no more alerts for this one');
+          renderDetail(sheet, mediaType, d, fallbackTitle);
+          if (tab === 'library') renderLibrary();
+        } catch { stopBtn.disabled = false; toast('Failed — is the Pi up?'); }
+      };
+      actions.appendChild(stopBtn);
+    }
     const rm = el('<button class="btn danger">Remove</button>');
     rm.onclick = async () => {
       if (!confirm(`Remove “${title}” and its watch history?`)) return;
@@ -647,6 +718,9 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
       const c = el(`<button class="chip ${inF() ? 'active' : ''}">${f.shared ? '👥 ' : ''}${esc(f.name)}</button>`);
       c.onclick = async () => {
         const target = !inF();
+        if (!target && f.shared &&
+            !confirm(`Remove from shared folder “${f.name}”?\n\nWatch progress on this title will STOP syncing between you.`))
+          return;
         try {
           await api(`/folders/${f.id}/items?${userQ()}`, { method: 'PUT',
             body: { item_id: item.id, member: target } });
@@ -846,7 +920,7 @@ async function checkNewEpisodes() {
   if (!prev) return;                       // first open — nothing to compare
   const prevDate = prev.slice(0, 10);
   try { if (!library.length) await loadLibrary(); } catch { return; }
-  const shows = library.filter(i => i.media_type === 'tv');
+  const shows = library.filter(i => i.media_type === 'tv' && !i.stopped);
   if (!shows.length) return;
   const found = [];
   await Promise.all(shows.map(async s => {
