@@ -30,6 +30,20 @@
     background: none; border: none; color: var(--muted); font-size: 20px;
     cursor: pointer; padding: 6px;
   }
+  .profilechip {
+    background: var(--panel2); border: 1px solid #2a3040; color: var(--text);
+    border-radius: 20px; padding: 6px 14px; font-size: 13.5px; font-weight: 600;
+    cursor: pointer; max-width: 120px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .profilechip:empty { display: none; }
+  .profile-btn {
+    display: block; width: 100%; text-align: center; background: var(--panel2);
+    border: 1px solid #2a3040; color: var(--text); border-radius: var(--radius);
+    padding: 16px; font-size: 17px; font-weight: 600; cursor: pointer;
+    margin-bottom: 10px;
+  }
+  .profile-btn.active { border-color: var(--accent); color: var(--accent); }
   main { padding: 16px; max-width: 720px; margin: 0 auto; }
 
   /* tabs */
@@ -176,6 +190,7 @@
 <header>
   <h1>Watch<span>Pi</span></h1>
   <div class="spacer"></div>
+  <button class="profilechip" id="profile-chip" onclick="openProfilePicker()" title="Switch profile"></button>
   <button class="iconbtn" onclick="openSettings()" title="Settings">⚙</button>
 </header>
 
@@ -203,6 +218,20 @@ async function loadConfig() {
     S.key = cfg.tmdb_key || '';
     S.region = cfg.region || 'US';
   } catch { /* Pi unreachable — views show their own errors */ }
+}
+
+/* Current profile. The library is shared; watch progress is per profile. */
+let USER = null;     // {id, name}
+let USERS = [];
+function userQ() { return USER ? `user=${USER.id}` : ''; }
+async function loadUsers() {
+  try { USERS = await api('/users'); } catch { USERS = []; }
+  const savedId = parseInt(localStorage.getItem('watchpi_user') || '0', 10);
+  USER = USERS.find(u => u.id === savedId) || null;
+  updateProfileChip();
+}
+function updateProfileChip() {
+  document.getElementById('profile-chip').textContent = USER ? USER.name : '';
 }
 const IMG = 'https://image.tmdb.org/t/p/';
 let tab = 'library';
@@ -247,7 +276,7 @@ async function api(path, opts = {}) {
 }
 
 async function loadLibrary() {
-  library = await api('/library');
+  library = USER ? await api(`/library?${userQ()}`) : [];
   libIndex = {};
   library.forEach(i => libIndex[`${i.media_type}:${i.tmdb_id}`] = i);
 }
@@ -415,7 +444,7 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
     if (mediaType === 'movie') {
       const w = el(`<button class="btn ${item.watched ? 'green' : ''}">${item.watched ? '✓ Watched' : 'Mark watched'}</button>`);
       w.onclick = async () => {
-        await api(`/library/${item.id}`, { method: 'PATCH', body: { watched: !item.watched } });
+        await api(`/library/${item.id}?${userQ()}`, { method: 'PATCH', body: { watched: !item.watched } });
         await loadLibrary();
         renderDetail(sheet, mediaType, d, fallbackTitle);
         if (tab === 'library') renderLibrary();
@@ -475,7 +504,7 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
 async function renderSeasons(box, d, item) {
   box.innerHTML = '<div class="spin">Loading watch history…</div>';
   let watchedList;
-  try { watchedList = await api(`/library/${item.id}/episodes`); }
+  try { watchedList = await api(`/library/${item.id}/episodes?${userQ()}`); }
   catch { box.innerHTML = '<div class="prov-note">Couldn’t load watch history.</div>'; return; }
   const watched = new Set(watchedList.map(e => `${e.season}:${e.episode}`));
 
@@ -517,7 +546,7 @@ async function renderSeasons(box, d, item) {
 
       const setEps = async (pairs, on) => {
         try {
-          await api(`/library/${item.id}/episodes`, { method: 'PUT', body: {
+          await api(`/library/${item.id}/episodes?${userQ()}`, { method: 'PUT', body: {
             episodes: pairs.map(([se, ep]) => ({ season: se, episode: ep })), watched: on } });
           pairs.forEach(([se, ep]) => on ? watched.add(`${se}:${ep}`) : watched.delete(`${se}:${ep}`));
           return true;
@@ -559,6 +588,51 @@ async function renderSeasons(box, d, item) {
   }
 }
 
+/* ============================================================ profiles */
+function openProfilePicker(closable = true) {
+  const bd = document.getElementById('sheet-backdrop');
+  const sheet = document.getElementById('sheet');
+  bd.classList.add('open');
+  sheet.innerHTML = `
+    <div class="grabber"></div>
+    <h2 style="margin-bottom:4px">Who's watching?</h2>
+    <p class="hint" style="margin-bottom:16px">The library is shared — episode progress is yours.</p>
+    <div id="profile-list"></div>
+    <div class="field" style="margin-top:14px">
+      <label>Add a person</label>
+      <div style="display:flex;gap:8px">
+        <input id="new-profile" type="text" maxlength="30" placeholder="Name" style="flex:1">
+        <button class="btn primary" id="add-profile">Add</button>
+      </div>
+    </div>`;
+  const list = sheet.querySelector('#profile-list');
+  for (const u of USERS) {
+    const b = el(`<button class="profile-btn ${USER && USER.id === u.id ? 'active' : ''}">${esc(u.name)}</button>`);
+    b.onclick = () => selectUser(u);
+    list.appendChild(b);
+  }
+  if (!USERS.length) list.appendChild(el('<p class="hint" style="margin-bottom:10px">No profiles yet — add yourselves below.</p>'));
+  const input = sheet.querySelector('#new-profile');
+  sheet.querySelector('#add-profile').onclick = async () => {
+    const name = input.value.trim();
+    if (!name) return;
+    try {
+      const u = await api('/users', { method: 'POST', body: { name } });
+      USERS.push(u);
+      selectUser(u);
+    } catch { toast('Could not add profile (name taken?)'); }
+  };
+  if (!closable) bd.onclick = null; // must pick someone
+}
+
+function selectUser(u) {
+  USER = u;
+  localStorage.setItem('watchpi_user', String(u.id));
+  updateProfileChip();
+  closeSheet();
+  showTab('library');
+}
+
 /* ============================================================ settings */
 function openSettings() {
   const bd = document.getElementById('sheet-backdrop');
@@ -596,15 +670,17 @@ function openSettings() {
       detailCache = {}; // region affects providers
       closeSheet();
       toast('Saved to the Pi');
+      if (!USER) setTimeout(() => openProfilePicker(false), 300);
     } catch { btn.disabled = false; toast('Failed to save — is the Pi up?'); }
   };
 }
 
 /* ============================================================ boot */
 (async () => {
-  await loadConfig();
+  await Promise.all([loadConfig(), loadUsers()]);
   showTab('library');
   if (!S.key) setTimeout(openSettings, 400);
+  else if (!USER) setTimeout(() => openProfilePicker(false), 200);
 })();
 </script>
 </body>
