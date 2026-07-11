@@ -194,12 +194,16 @@
 
 <script>
 /* ============================================================ config */
-const S = {
-  get key()    { return localStorage.getItem('tmdb_key') || ''; },
-  set key(v)   { localStorage.setItem('tmdb_key', v.trim()); },
-  get region() { return localStorage.getItem('region') || 'US'; },
-  set region(v){ localStorage.setItem('region', v); },
-};
+/* Config lives on the Pi (data/config.json) so every device shares the
+   same TMDB key & region — enter it once, anywhere. */
+const S = { key: '', region: 'US' };
+async function loadConfig() {
+  try {
+    const cfg = await api('/config');
+    S.key = cfg.tmdb_key || '';
+    S.region = cfg.region || 'US';
+  } catch { /* Pi unreachable — views show their own errors */ }
+}
 const IMG = 'https://image.tmdb.org/t/p/';
 let tab = 'library';
 let library = [];            // items from the Pi
@@ -568,7 +572,7 @@ function openSettings() {
       <input id="set-key" type="text" value="${esc(S.key)}" placeholder="v3 key or v4 read token"
              autocomplete="off" spellcheck="false">
       <div class="hint">Free at <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">themoviedb.org → Settings → API</a>.
-      Stored only in this browser — never sent to the Pi.</div>
+      Saved on the Pi — shared by every device on your network.</div>
     </div>
     <div class="field">
       <label>Region for streaming availability</label>
@@ -580,18 +584,28 @@ function openSettings() {
       <button class="btn primary" id="set-save">Save</button>
       <button class="btn" onclick="closeSheet()">Cancel</button>
     </div>`;
-  document.getElementById('set-save').onclick = () => {
-    S.key = document.getElementById('set-key').value;
-    S.region = (document.getElementById('set-region').value || 'US').toUpperCase();
-    detailCache = {}; // region affects providers
-    closeSheet();
-    toast('Saved');
+  document.getElementById('set-save').onclick = async () => {
+    const btn = document.getElementById('set-save');
+    btn.disabled = true;
+    try {
+      const cfg = await api('/config', { method: 'PUT', body: {
+        tmdb_key: document.getElementById('set-key').value.trim(),
+        region: (document.getElementById('set-region').value || 'US').toUpperCase(),
+      }});
+      S.key = cfg.tmdb_key; S.region = cfg.region;
+      detailCache = {}; // region affects providers
+      closeSheet();
+      toast('Saved to the Pi');
+    } catch { btn.disabled = false; toast('Failed to save — is the Pi up?'); }
   };
 }
 
 /* ============================================================ boot */
-showTab('library');
-if (!S.key) setTimeout(openSettings, 400);
+(async () => {
+  await loadConfig();
+  showTab('library');
+  if (!S.key) setTimeout(openSettings, 400);
+})();
 </script>
 </body>
 </html>
