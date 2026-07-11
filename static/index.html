@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>WatchPi</title>
+<link rel="manifest" href='data:application/json,{"name":"WatchPi","short_name":"WatchPi","start_url":"/","display":"standalone","background_color":"%230f1115","theme_color":"%230f1115","icons":[]}'>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1f2430;
+    --text: #e8eaf0; --muted: #8b93a7; --accent: #f5c518;
+    --green: #3ecf8e; --red: #e5484d; --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding-bottom: calc(64px + env(safe-area-inset-bottom));
+  }
+  header {
+    position: sticky; top: 0; z-index: 10; background: rgba(15,17,21,.92);
+    backdrop-filter: blur(8px); padding: 12px 16px; display: flex;
+    align-items: center; gap: 10px; border-bottom: 1px solid #262b36;
+  }
+  header h1 { font-size: 18px; font-weight: 700; }
+  header h1 span { color: var(--accent); }
+  header .spacer { flex: 1; }
+  .iconbtn {
+    background: none; border: none; color: var(--muted); font-size: 20px;
+    cursor: pointer; padding: 6px;
+  }
+  main { padding: 16px; max-width: 720px; margin: 0 auto; }
+
+  /* tabs */
+  nav {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
+    display: flex; background: var(--panel); border-top: 1px solid #262b36;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  nav button {
+    flex: 1; background: none; border: none; color: var(--muted);
+    padding: 12px 0 10px; font-size: 13px; cursor: pointer;
+  }
+  nav button.active { color: var(--accent); font-weight: 600; }
+  nav button .ico { display: block; font-size: 20px; margin-bottom: 2px; }
+
+  /* search */
+  .searchbar { display: flex; gap: 8px; margin-bottom: 16px; }
+  .searchbar input {
+    flex: 1; background: var(--panel); border: 1px solid #2a3040;
+    border-radius: var(--radius); color: var(--text); padding: 12px 14px;
+    font-size: 16px; outline: none;
+  }
+  .searchbar input:focus { border-color: var(--accent); }
+
+  /* cards grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 12px; }
+  .card { cursor: pointer; position: relative; }
+  .card img, .card .noposter {
+    width: 100%; aspect-ratio: 2/3; object-fit: cover;
+    border-radius: var(--radius); background: var(--panel2); display: block;
+  }
+  .card .noposter { display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 12px; text-align: center; padding: 8px; }
+  .card .title { font-size: 12.5px; margin-top: 6px; color: var(--text);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .card .sub { font-size: 11px; color: var(--muted); }
+  .badge {
+    position: absolute; top: 6px; left: 6px; background: rgba(0,0,0,.75);
+    color: var(--accent); font-size: 10px; font-weight: 700; padding: 2px 7px;
+    border-radius: 20px; text-transform: uppercase;
+  }
+  .badge.done { color: var(--green); }
+  .progressbar { height: 4px; background: #2a3040; border-radius: 2px; margin-top: 5px; overflow: hidden; }
+  .progressbar div { height: 100%; background: var(--green); border-radius: 2px; }
+
+  .empty { text-align: center; color: var(--muted); padding: 48px 16px; }
+  .empty .big { font-size: 40px; margin-bottom: 10px; }
+
+  /* detail sheet */
+  .sheet-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 20;
+    display: none; align-items: flex-end; justify-content: center;
+  }
+  .sheet-backdrop.open { display: flex; }
+  .sheet {
+    background: var(--panel); width: 100%; max-width: 720px;
+    max-height: 88vh; overflow-y: auto; border-radius: 18px 18px 0 0;
+    padding: 20px 16px calc(24px + env(safe-area-inset-bottom));
+  }
+  .sheet .grabber { width: 40px; height: 4px; background: #3a4152; border-radius: 2px; margin: 0 auto 16px; }
+  .detail-head { display: flex; gap: 14px; }
+  .detail-head img, .detail-head .noposter {
+    width: 110px; aspect-ratio: 2/3; object-fit: cover; border-radius: var(--radius);
+    background: var(--panel2); flex-shrink: 0;
+  }
+  .detail-head h2 { font-size: 19px; margin-bottom: 4px; }
+  .detail-head .meta { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+  .btnrow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .btn {
+    border: none; border-radius: 10px; padding: 10px 16px; font-size: 14px;
+    font-weight: 600; cursor: pointer; background: var(--panel2); color: var(--text);
+  }
+  .btn.primary { background: var(--accent); color: #111; }
+  .btn.danger { background: transparent; color: var(--red); border: 1px solid var(--red); }
+  .btn.green { background: var(--green); color: #0b2018; }
+  .btn:disabled { opacity: .5; cursor: default; }
+
+  .overview { color: var(--muted); font-size: 14px; margin: 14px 0; }
+  h3.section { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 18px 0 10px; }
+
+  /* providers */
+  .providers { display: flex; gap: 10px; flex-wrap: wrap; }
+  .provider { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 56px; }
+  .provider img { width: 44px; height: 44px; border-radius: 10px; }
+  .provider span { font-size: 10px; color: var(--muted); text-align: center;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis; width: 100%; }
+  .prov-label { font-size: 11px; color: var(--muted); margin: 8px 0 6px; }
+  .prov-note { font-size: 11px; color: var(--muted); margin-top: 10px; }
+  .prov-note a { color: var(--accent); }
+
+  /* seasons / episodes */
+  .season {
+    background: var(--panel2); border-radius: var(--radius); margin-bottom: 8px; overflow: hidden;
+  }
+  .season-head {
+    display: flex; align-items: center; gap: 10px; padding: 12px 14px; cursor: pointer;
+  }
+  .season-head .name { font-weight: 600; font-size: 14.5px; flex: 1; }
+  .season-head .count { font-size: 12px; color: var(--muted); }
+  .season-head .chev { color: var(--muted); transition: transform .15s; }
+  .season.open .chev { transform: rotate(90deg); }
+  .season-body { display: none; padding: 0 14px 12px; }
+  .season.open .season-body { display: block; }
+  .season-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+  .season-actions .btn { padding: 6px 12px; font-size: 12.5px; }
+  .ep {
+    display: flex; align-items: center; gap: 10px; padding: 9px 0;
+    border-top: 1px solid #2a3040; cursor: pointer;
+  }
+  .ep .num { color: var(--muted); font-size: 12.5px; width: 34px; flex-shrink: 0; }
+  .ep .name { flex: 1; font-size: 14px; }
+  .ep.watched .name { color: var(--muted); text-decoration: line-through; }
+  .check {
+    width: 22px; height: 22px; border-radius: 50%; border: 2px solid #3a4152;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    font-size: 12px; color: transparent;
+  }
+  .ep.watched .check { background: var(--green); border-color: var(--green); color: #0b2018; }
+
+  /* settings */
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .field input, .field select {
+    width: 100%; background: var(--bg); border: 1px solid #2a3040; border-radius: 10px;
+    color: var(--text); padding: 11px 12px; font-size: 15px; outline: none;
+  }
+  .hint { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+  .hint a { color: var(--accent); }
+
+  .toast {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); color: var(--text); padding: 10px 18px;
+    border-radius: 24px; font-size: 14px; z-index: 40; opacity: 0;
+    transition: opacity .2s; pointer-events: none; border: 1px solid #333b4d;
+    max-width: 90vw; text-align: center;
+  }
+  .toast.show { opacity: 1; }
+  .spin { text-align: center; color: var(--muted); padding: 24px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Watch<span>Pi</span></h1>
+  <div class="spacer"></div>
+  <button class="iconbtn" onclick="openSettings()" title="Settings">⚙</button>
+</header>
+
+<main id="main"></main>
+
+<nav>
+  <button id="tab-library" class="active" onclick="showTab('library')"><span class="ico">🗂</span>Library</button>
+  <button id="tab-search" onclick="showTab('search')"><span class="ico">🔍</span>Search</button>
+</nav>
+
+<div class="sheet-backdrop" id="sheet-backdrop" onclick="if(event.target===this)closeSheet()">
+  <div class="sheet" id="sheet"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ============================================================ config */
+const S = {
+  get key()    { return localStorage.getItem('tmdb_key') || ''; },
+  set key(v)   { localStorage.setItem('tmdb_key', v.trim()); },
+  get region() { return localStorage.getItem('region') || 'US'; },
+  set region(v){ localStorage.setItem('region', v); },
+};
+const IMG = 'https://image.tmdb.org/t/p/';
+let tab = 'library';
+let library = [];            // items from the Pi
+let libIndex = {};           // `${media_type}:${tmdb_id}` -> item
+let detailCache = {};        // tmdb detail responses (per session)
+let seasonCache = {};        // `${tmdbId}:${season}` -> episodes
+
+/* ============================================================ helpers */
+function el(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
+function esc(s) { return (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2600);
+}
+function year(d) { return d ? d.slice(0, 4) : ''; }
+
+/* TMDB — supports both a v3 api key and a v4 read access token */
+async function tmdb(path, params = {}) {
+  const url = new URL('https://api.themoviedb.org/3' + path);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  const opts = { headers: {} };
+  const key = S.key;
+  if (!key) throw new Error('no-key');
+  if (key.length > 60) opts.headers['Authorization'] = 'Bearer ' + key; // v4 token
+  else url.searchParams.set('api_key', key);                            // v3 key
+  const r = await fetch(url, opts);
+  if (r.status === 401) throw new Error('bad-key');
+  if (!r.ok) throw new Error('tmdb-' + r.status);
+  return r.json();
+}
+
+/* Pi API */
+async function api(path, opts = {}) {
+  const r = await fetch('/api' + path, {
+    headers: { 'Content-Type': 'application/json' }, ...opts,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  if (!r.ok && r.status !== 204) throw new Error('api-' + r.status);
+  return r.status === 204 ? null : r.json();
+}
+
+async function loadLibrary() {
+  library = await api('/library');
+  libIndex = {};
+  library.forEach(i => libIndex[`${i.media_type}:${i.tmdb_id}`] = i);
+}
+
+/* ============================================================ tabs */
+function showTab(t) {
+  tab = t;
+  document.getElementById('tab-library').classList.toggle('active', t === 'library');
+  document.getElementById('tab-search').classList.toggle('active', t === 'search');
+  if (t === 'library') renderLibrary(); else renderSearch();
+}
+
+/* ============================================================ library view */
+async function renderLibrary() {
+  const main = document.getElementById('main');
+  main.innerHTML = '<div class="spin">Loading…</div>';
+  try { await loadLibrary(); } catch { main.innerHTML = '<div class="empty">Can’t reach the Pi API.</div>'; return; }
+
+  if (!library.length) {
+    main.innerHTML = `<div class="empty"><div class="big">🎬</div>
+      Your library is empty.<br>Search for a show or movie to add it.</div>`;
+    return;
+  }
+  const grid = el('<div class="grid"></div>');
+  for (const item of library) {
+    const card = el(`<div class="card">
+      ${item.poster_path
+        ? `<img loading="lazy" src="${IMG}w185${item.poster_path}" alt="">`
+        : `<div class="noposter">${esc(item.title)}</div>`}
+      <div class="title">${esc(item.title)}</div>
+      <div class="sub"></div>
+    </div>`);
+    const sub = card.querySelector('.sub');
+    if (item.media_type === 'movie') {
+      if (item.watched) card.prepend(el('<span class="badge done">✓ seen</span>'));
+      sub.textContent = 'Movie';
+    } else {
+      sub.textContent = item.watched_episodes ? `${item.watched_episodes} ep watched` : 'TV show';
+      card.prepend(el('<span class="badge">TV</span>'));
+    }
+    card.onclick = () => openDetail(item.media_type, item.tmdb_id, item.title);
+    grid.appendChild(card);
+  }
+  main.innerHTML = '';
+  main.appendChild(grid);
+}
+
+/* ============================================================ search view */
+function renderSearch() {
+  const main = document.getElementById('main');
+  main.innerHTML = `
+    <div class="searchbar">
+      <input id="q" type="search" placeholder="Search movies & TV…" autocomplete="off">
+    </div>
+    <div id="results"><div class="empty">Type to search TMDB.<br>
+      <span style="font-size:12px">Results come straight from the internet — the Pi never sees them.</span></div></div>`;
+  const q = document.getElementById('q');
+  let timer;
+  q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => doSearch(q.value), 350); });
+  q.focus();
+}
+
+async function doSearch(query) {
+  const box = document.getElementById('results');
+  if (!query.trim()) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="spin">Searching…</div>';
+  let data;
+  try {
+    data = await tmdb('/search/multi', { query, include_adult: 'false' });
+  } catch (e) { return handleTmdbError(e, box); }
+
+  const results = (data.results || []).filter(r => r.media_type === 'movie' || r.media_type === 'tv');
+  if (!results.length) { box.innerHTML = '<div class="empty">No results.</div>'; return; }
+
+  const grid = el('<div class="grid"></div>');
+  for (const r of results) {
+    const title = r.title || r.name;
+    const inLib = libIndex[`${r.media_type}:${r.id}`];
+    const card = el(`<div class="card">
+      ${r.poster_path
+        ? `<img loading="lazy" src="${IMG}w185${r.poster_path}" alt="">`
+        : `<div class="noposter">${esc(title)}</div>`}
+      ${inLib ? '<span class="badge done">✓ added</span>' : `<span class="badge">${r.media_type}</span>`}
+      <div class="title">${esc(title)}</div>
+      <div class="sub">${year(r.release_date || r.first_air_date)}</div>
+    </div>`);
+    card.onclick = () => openDetail(r.media_type, r.id, title);
+    grid.appendChild(card);
+  }
+  box.innerHTML = '';
+  box.appendChild(grid);
+}
+
+function handleTmdbError(e, box) {
+  if (e.message === 'no-key') {
+    if (box) box.innerHTML = '<div class="empty">Add your TMDB API key in ⚙ settings first.</div>';
+    openSettings();
+  } else if (e.message === 'bad-key') {
+    if (box) box.innerHTML = '<div class="empty">TMDB rejected the API key — check ⚙ settings.</div>';
+  } else {
+    if (box) box.innerHTML = '<div class="empty">TMDB request failed. Are you online?</div>';
+  }
+}
+
+/* ============================================================ detail sheet */
+function closeSheet() { document.getElementById('sheet-backdrop').classList.remove('open'); }
+
+async function openDetail(mediaType, tmdbId, fallbackTitle) {
+  const bd = document.getElementById('sheet-backdrop');
+  const sheet = document.getElementById('sheet');
+  bd.classList.add('open');
+  sheet.innerHTML = '<div class="grabber"></div><div class="spin">Loading…</div>';
+
+  let d;
+  const ck = `${mediaType}:${tmdbId}`;
+  try {
+    d = detailCache[ck] || await tmdb(`/${mediaType}/${tmdbId}`, { append_to_response: 'watch/providers' });
+    detailCache[ck] = d;
+  } catch (e) {
+    sheet.innerHTML = '<div class="grabber"></div>';
+    const box = el('<div></div>'); sheet.appendChild(box);
+    return handleTmdbError(e, box);
+  }
+  try { await loadLibrary(); } catch {}
+  renderDetail(sheet, mediaType, d, fallbackTitle);
+}
+
+function renderDetail(sheet, mediaType, d, fallbackTitle) {
+  const title = d.title || d.name || fallbackTitle;
+  const item = libIndex[`${mediaType}:${d.id}`];
+  const date = d.release_date || d.first_air_date;
+  const meta = [
+    year(date),
+    mediaType === 'tv' ? `${d.number_of_seasons} season${d.number_of_seasons === 1 ? '' : 's'}` : (d.runtime ? d.runtime + ' min' : ''),
+    (d.vote_average ? '★ ' + d.vote_average.toFixed(1) : ''),
+  ].filter(Boolean).join(' · ');
+
+  sheet.innerHTML = '<div class="grabber"></div>';
+  sheet.appendChild(el(`<div class="detail-head">
+    ${d.poster_path ? `<img src="${IMG}w342${d.poster_path}" alt="">` : '<div class="noposter"></div>'}
+    <div>
+      <h2>${esc(title)}</h2>
+      <div class="meta">${esc(meta)}</div>
+      <div class="btnrow" id="d-actions"></div>
+    </div>
+  </div>`));
+
+  /* action buttons */
+  const actions = sheet.querySelector('#d-actions');
+  if (!item) {
+    const add = el('<button class="btn primary">+ Add to library</button>');
+    add.onclick = async () => {
+      add.disabled = true;
+      try {
+        await api('/library', { method: 'POST', body: {
+          tmdb_id: d.id, media_type: mediaType, title, poster_path: d.poster_path } });
+        await loadLibrary();
+        toast('Added to library');
+        renderDetail(sheet, mediaType, d, fallbackTitle);
+        if (tab === 'library') renderLibrary();
+      } catch { add.disabled = false; toast('Failed — is the Pi up?'); }
+    };
+    actions.appendChild(add);
+  } else {
+    if (mediaType === 'movie') {
+      const w = el(`<button class="btn ${item.watched ? 'green' : ''}">${item.watched ? '✓ Watched' : 'Mark watched'}</button>`);
+      w.onclick = async () => {
+        await api(`/library/${item.id}`, { method: 'PATCH', body: { watched: !item.watched } });
+        await loadLibrary();
+        renderDetail(sheet, mediaType, d, fallbackTitle);
+        if (tab === 'library') renderLibrary();
+      };
+      actions.appendChild(w);
+    }
+    const rm = el('<button class="btn danger">Remove</button>');
+    rm.onclick = async () => {
+      if (!confirm(`Remove “${title}” and its watch history?`)) return;
+      await api(`/library/${item.id}`, { method: 'DELETE' });
+      await loadLibrary();
+      toast('Removed');
+      closeSheet();
+      if (tab === 'library') renderLibrary();
+    };
+    actions.appendChild(rm);
+  }
+
+  /* streaming availability */
+  const provWrap = el('<div></div>');
+  provWrap.appendChild(el(`<h3 class="section">Where to watch (${esc(S.region)})</h3>`));
+  const p = (d['watch/providers'] && d['watch/providers'].results || {})[S.region];
+  if (!p || (!p.flatrate && !p.rent && !p.buy && !p.free)) {
+    provWrap.appendChild(el('<div class="prov-note">No streaming info for your region — change it in ⚙ settings.</div>'));
+  } else {
+    for (const [k, label] of [['free', 'Free'], ['flatrate', 'Stream'], ['rent', 'Rent'], ['buy', 'Buy']]) {
+      if (!p[k]) continue;
+      provWrap.appendChild(el(`<div class="prov-label">${label}</div>`));
+      const row = el('<div class="providers"></div>');
+      for (const pr of p[k]) {
+        row.appendChild(el(`<div class="provider">
+          <img loading="lazy" src="${IMG}w92${pr.logo_path}" alt="">
+          <span>${esc(pr.provider_name)}</span></div>`));
+      }
+      provWrap.appendChild(row);
+    }
+    provWrap.appendChild(el(`<div class="prov-note">Availability data by <a href="${p.link}" target="_blank" rel="noopener">JustWatch via TMDB</a>.</div>`));
+  }
+  sheet.appendChild(provWrap);
+
+  if (d.overview) {
+    sheet.appendChild(el('<h3 class="section">Overview</h3>'));
+    sheet.appendChild(el(`<p class="overview">${esc(d.overview)}</p>`));
+  }
+
+  /* seasons & episodes (tv, in library) */
+  if (mediaType === 'tv' && item) {
+    sheet.appendChild(el('<h3 class="section">Episodes</h3>'));
+    const seasonsBox = el('<div></div>');
+    sheet.appendChild(seasonsBox);
+    renderSeasons(seasonsBox, d, item);
+  } else if (mediaType === 'tv' && !item) {
+    sheet.appendChild(el('<div class="prov-note">Add to library to track episodes.</div>'));
+  }
+}
+
+async function renderSeasons(box, d, item) {
+  box.innerHTML = '<div class="spin">Loading watch history…</div>';
+  let watchedList;
+  try { watchedList = await api(`/library/${item.id}/episodes`); }
+  catch { box.innerHTML = '<div class="prov-note">Couldn’t load watch history.</div>'; return; }
+  const watched = new Set(watchedList.map(e => `${e.season}:${e.episode}`));
+
+  box.innerHTML = '';
+  const seasons = (d.seasons || []).filter(s => s.season_number > 0); // skip specials by default
+  for (const s of seasons) {
+    const sec = el(`<div class="season">
+      <div class="season-head">
+        <span class="chev">›</span>
+        <span class="name">${esc(s.name)}</span>
+        <span class="count"></span>
+      </div>
+      <div class="season-body"></div>
+    </div>`);
+    const head = sec.querySelector('.season-head');
+    const body = sec.querySelector('.season-body');
+    const countEl = sec.querySelector('.count');
+
+    const updateCount = () => {
+      const w = [...watched].filter(k => k.startsWith(s.season_number + ':')).length;
+      countEl.textContent = `${w}/${s.episode_count || '?'}`;
+      countEl.style.color = (s.episode_count && w >= s.episode_count) ? 'var(--green)' : '';
+    };
+    updateCount();
+
+    head.onclick = async () => {
+      sec.classList.toggle('open');
+      if (!sec.classList.contains('open') || body.dataset.loaded) return;
+      body.innerHTML = '<div class="spin">Loading episodes…</div>';
+      let eps;
+      const ck = `${d.id}:${s.season_number}`;
+      try {
+        eps = seasonCache[ck] || (await tmdb(`/tv/${d.id}/season/${s.season_number}`)).episodes || [];
+        seasonCache[ck] = eps;
+      } catch (e) { body.innerHTML = ''; return handleTmdbError(e, body); }
+
+      body.innerHTML = '';
+      body.dataset.loaded = '1';
+
+      const setEps = async (pairs, on) => {
+        try {
+          await api(`/library/${item.id}/episodes`, { method: 'PUT', body: {
+            episodes: pairs.map(([se, ep]) => ({ season: se, episode: ep })), watched: on } });
+          pairs.forEach(([se, ep]) => on ? watched.add(`${se}:${ep}`) : watched.delete(`${se}:${ep}`));
+          return true;
+        } catch { toast('Failed to save — is the Pi up?'); return false; }
+      };
+
+      const act = el(`<div class="season-actions">
+        <button class="btn" data-a="all">Mark season watched</button>
+        <button class="btn" data-a="none">Clear</button></div>`);
+      act.querySelector('[data-a=all]').onclick = async () => {
+        if (await setEps(eps.map(e => [s.season_number, e.episode_number]), true)) refresh();
+      };
+      act.querySelector('[data-a=none]').onclick = async () => {
+        if (await setEps(eps.map(e => [s.season_number, e.episode_number]), false)) refresh();
+      };
+      body.appendChild(act);
+
+      const rows = [];
+      for (const e of eps) {
+        const key = `${s.season_number}:${e.episode_number}`;
+        const row = el(`<div class="ep">
+          <span class="num">E${e.episode_number}</span>
+          <span class="name">${esc(e.name || 'Episode ' + e.episode_number)}</span>
+          <span class="check">✓</span></div>`);
+        row.onclick = async () => {
+          const on = !watched.has(key);
+          if (await setEps([[s.season_number, e.episode_number]], on)) refresh();
+        };
+        rows.push([row, key]);
+        body.appendChild(row);
+      }
+      function refresh() {
+        rows.forEach(([row, key]) => row.classList.toggle('watched', watched.has(key)));
+        updateCount();
+      }
+      refresh();
+    };
+    box.appendChild(sec);
+  }
+}
+
+/* ============================================================ settings */
+function openSettings() {
+  const bd = document.getElementById('sheet-backdrop');
+  const sheet = document.getElementById('sheet');
+  bd.classList.add('open');
+  sheet.innerHTML = `
+    <div class="grabber"></div>
+    <h2 style="margin-bottom:16px">Settings</h2>
+    <div class="field">
+      <label>TMDB API key</label>
+      <input id="set-key" type="text" value="${esc(S.key)}" placeholder="v3 key or v4 read token"
+             autocomplete="off" spellcheck="false">
+      <div class="hint">Free at <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">themoviedb.org → Settings → API</a>.
+      Stored only in this browser — never sent to the Pi.</div>
+    </div>
+    <div class="field">
+      <label>Region for streaming availability</label>
+      <input id="set-region" type="text" maxlength="2" value="${esc(S.region)}"
+             style="text-transform:uppercase" placeholder="US">
+      <div class="hint">Two-letter country code, e.g. US, AR, ES, DE.</div>
+    </div>
+    <div class="btnrow">
+      <button class="btn primary" id="set-save">Save</button>
+      <button class="btn" onclick="closeSheet()">Cancel</button>
+    </div>`;
+  document.getElementById('set-save').onclick = () => {
+    S.key = document.getElementById('set-key').value;
+    S.region = (document.getElementById('set-region').value || 'US').toUpperCase();
+    detailCache = {}; // region affects providers
+    closeSheet();
+    toast('Saved');
+  };
+}
+
+/* ============================================================ boot */
+showTab('library');
+if (!S.key) setTimeout(openSettings, 400);
+</script>
+</body>
+</html>
