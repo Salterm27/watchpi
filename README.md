@@ -64,7 +64,9 @@ Open `http://<pi-hostname>:8001` (or route `/watchpi/*` through Caddy later).
 ## Backups
 
 `deploy/backup.sh` backs up **all** of `/srv/apps` (so future apps are covered
-automatically). Setup is documented in the script header: install restic,
+automatically). Requires `sudo apt install restic sqlite3` (sqlite3 is used to
+take consistent db snapshots and is NOT preinstalled on Raspberry Pi OS Lite).
+Setup is documented in the script header: install restic,
 create `/etc/watchpi/restic.env` with your R2/B2 credentials and a repo
 passphrase, run `restic init` once, then:
 
