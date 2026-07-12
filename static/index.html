@@ -710,7 +710,7 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
   }
 
   /* folders (library items only) */
-  if (item && FOLDERS.length) {
+  if (item) {
     sheet.appendChild(el('<h3 class="section">Folders</h3>'));
     const frow = el('<div class="chips" style="flex-wrap:wrap;overflow:visible"></div>');
     for (const f of FOLDERS) {
@@ -733,7 +733,41 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
       };
       frow.appendChild(c);
     }
+    const newChip = el('<button class="chip new">＋ New folder</button>');
+    newChip.onclick = () => {
+      const form = sheet.querySelector('#new-folder-inline');
+      form.style.display = form.style.display === 'none' ? 'block' : 'none';
+    };
+    frow.appendChild(newChip);
     sheet.appendChild(frow);
+
+    const newForm = el(`
+      <div class="field" id="new-folder-inline" style="display:none">
+        <label>New folder</label>
+        <input id="nf2-name" type="text" maxlength="40" placeholder="e.g. Watching together">
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
+          <input id="nf2-shared" type="checkbox" style="width:auto"> 👥 Shared (progress syncs between users)
+        </label>
+        <div class="btnrow"><button class="btn primary" id="nf2-create">Create &amp; add</button></div>
+      </div>`);
+    newForm.querySelector('#nf2-create').onclick = async (ev) => {
+      const btn = ev.target;
+      const name = newForm.querySelector('#nf2-name').value.trim();
+      if (!name) return;
+      const shared = newForm.querySelector('#nf2-shared').checked;
+      btn.disabled = true;
+      try {
+        const folder = await api(`/folders?${userQ()}`, { method: 'POST', body: { name, shared } });
+        await api(`/folders/${folder.id}/items?${userQ()}`, { method: 'PUT',
+          body: { item_id: item.id, member: true } });
+        await loadFolders();
+        item.folders = [...(item.folders || []), folder.id];
+        toast(shared ? 'Folder created — progress now syncs 👥' : 'Folder created and added');
+        renderDetail(sheet, mediaType, d, fallbackTitle);
+        if (tab === 'library') renderLibrary();
+      } catch { btn.disabled = false; toast('Could not create folder'); }
+    };
+    sheet.appendChild(newForm);
   }
 
   /* streaming availability */
