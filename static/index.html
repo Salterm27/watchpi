@@ -280,6 +280,7 @@ let detailCache = {};        // tmdb detail responses (per session)
 let seasonCache = {};        // `${tmdbId}:${season}` -> episodes
 let FOLDERS = [];            // folders visible to the current user
 let currentFolder = null;    // null = All
+let currentType = 'all';     // 'all' | 'movie' | 'tv'
 let NEW_EPISODES = [];       // shows with episodes aired since last open
 
 /* ============================================================ helpers */
@@ -390,15 +391,35 @@ async function renderLibrary() {
   chips.appendChild(newChip);
   main.appendChild(chips);
 
-  const visible = currentFolder === null
+  /* type filter chips */
+  const typeChips = el('<div class="chips"></div>');
+  for (const [type, label] of [['all', 'All'], ['movie', 'Movies'], ['tv', 'Series']]) {
+    const c = el(`<button class="chip ${currentType === type ? 'active' : ''}">${label}</button>`);
+    c.onclick = () => { currentType = type; renderLibrary(); };
+    typeChips.appendChild(c);
+  }
+  main.appendChild(typeChips);
+
+  let visible = currentFolder === null
     ? library
     : library.filter(i => (i.folders || []).includes(currentFolder));
+  if (currentType !== 'all') visible = visible.filter(i => i.media_type === currentType);
+
+  /* series sort: actively-watching shows first, then by most recent watch activity */
+  if (currentType === 'tv') {
+    const isActive = i => i.watched_episodes > 0 && !i.stopped;
+    visible = [...visible].sort((a, b) => {
+      const av = isActive(a), bv = isActive(b);
+      if (av !== bv) return av ? -1 : 1;
+      return (b.last_watched_at || '').localeCompare(a.last_watched_at || '');
+    });
+  }
 
   if (!visible.length) {
     main.appendChild(el(`<div class="empty"><div class="big">🎬</div>
-      ${currentFolder === null
+      ${currentFolder === null && currentType === 'all'
         ? 'Your library is empty.<br>Search for a show or movie to add it.'
-        : 'This folder is empty.<br>Open a title and add it from there.'}</div>`));
+        : 'Nothing here.<br>Try a different filter, or open a title and add it from there.'}</div>`));
     return;
   }
   const grid = el('<div class="grid"></div>');
