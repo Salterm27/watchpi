@@ -121,7 +121,7 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def item_to_dict(row, watched=False, ep_count=0, stopped=False):
+def item_to_dict(row, watched=False, ep_count=0, stopped=False, last_watched_at=None):
     return {
         "id": row["id"],
         "tmdb_id": row["tmdb_id"],
@@ -132,6 +132,7 @@ def item_to_dict(row, watched=False, ep_count=0, stopped=False):
         "watched": bool(watched),
         "watched_episodes": ep_count,
         "stopped": bool(stopped),
+        "last_watched_at": last_watched_at,
     }
 
 
@@ -211,7 +212,11 @@ def list_library():
              EXISTS(SELECT 1 FROM movie_watches m
                WHERE m.item_id = i.id AND m.user_id = :u)          AS w,
              EXISTS(SELECT 1 FROM stopped s
-               WHERE s.item_id = i.id AND s.user_id = :u)          AS st
+               WHERE s.item_id = i.id AND s.user_id = :u)          AS st,
+             (SELECT MAX(watched_at) FROM episodes e
+               WHERE e.item_id = i.id AND e.user_id = :u)          AS last_ep_watched,
+             (SELECT watched_at FROM movie_watches m
+               WHERE m.item_id = i.id AND m.user_id = :u)          AS movie_watched_at
            FROM items i ORDER BY i.added_at DESC""",
         {"u": user["id"]},
     ).fetchall()
@@ -234,7 +239,8 @@ def list_library():
             eps_by_item.setdefault(e["item_id"], []).append([e["season"], e["episode"]])
     out = []
     for r in rows:
-        d = item_to_dict(r, r["w"], r["ep_count"], r["st"])
+        last_watched_at = max(filter(None, [r["last_ep_watched"], r["movie_watched_at"]]), default=None)
+        d = item_to_dict(r, r["w"], r["ep_count"], r["st"], last_watched_at)
         d["folders"] = by_item.get(r["id"], [])
         if request.args.get("include") == "episodes":
             d["episodes"] = eps_by_item.get(r["id"], [])
