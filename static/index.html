@@ -531,6 +531,9 @@ function openFolderManager() {
       toast('Folder created');
     } catch { toast('Could not create folder'); }
   };
+  sheet.querySelector('#nf-name').addEventListener('keydown', e => {
+    if (e.key === 'Enter') sheet.querySelector('#nf-create').click();
+  });
 }
 
 /* ============================================================ search view */
@@ -767,6 +770,9 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
         if (tab === 'library') renderLibrary();
       } catch { btn.disabled = false; toast('Could not create folder'); }
     };
+    newForm.querySelector('#nf2-name').addEventListener('keydown', e => {
+      if (e.key === 'Enter') newForm.querySelector('#nf2-create').click();
+    });
     sheet.appendChild(newForm);
   }
 
@@ -930,6 +936,9 @@ function openProfilePicker(closable = true) {
       selectUser(u);
     } catch { toast('Could not add profile (name taken?)'); }
   };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') sheet.querySelector('#add-profile').click();
+  });
   if (!closable) bd.onclick = null; // must pick someone
 }
 
@@ -1015,6 +1024,10 @@ function openSettings() {
       if (!USER) setTimeout(() => openProfilePicker(false), 300);
     } catch { btn.disabled = false; toast('Failed to save — is the Pi up?'); }
   };
+  for (const id of ['set-key', 'set-region'])
+    document.getElementById(id).addEventListener('keydown', e => {
+      if (e.key === 'Enter') document.getElementById('set-save').click();
+    });
 }
 
 /* ============================================================ boot */
