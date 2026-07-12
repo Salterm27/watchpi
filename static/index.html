@@ -512,14 +512,16 @@ function openFolderManager() {
   sheet.appendChild(list);
 
   sheet.appendChild(el(`
-    <div class="field" style="margin-top:16px">
-      <label>New folder</label>
-      <input id="nf-name" type="text" maxlength="40" placeholder="e.g. Watching together">
-      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
-        <input id="nf-shared" type="checkbox" style="width:auto"> 👥 Shared (progress syncs between users)
-      </label>
-    </div>
-    <div class="btnrow"><button class="btn primary" id="nf-create">Create</button></div>`));
+    <div>
+      <div class="field" style="margin-top:16px">
+        <label>New folder</label>
+        <input id="nf-name" type="text" maxlength="40" placeholder="e.g. Watching together">
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
+          <input id="nf-shared" type="checkbox" style="width:auto"> 👥 Shared (progress syncs between users)
+        </label>
+      </div>
+      <div class="btnrow"><button class="btn primary" id="nf-create">Create</button></div>
+    </div>`));
   sheet.querySelector('#nf-create').onclick = async () => {
     const name = sheet.querySelector('#nf-name').value.trim();
     if (!name) return;
