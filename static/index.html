@@ -490,9 +490,15 @@ async function renderFeed() {
   main.innerHTML = '';
   const box = el('<div></div>');
   for (const e of events) {
-    const what = e.kind === 'movie'
-      ? `<b>${esc(e.user_name)}</b> watched ${esc(e.title)}`
-      : `<b>${esc(e.user_name)}</b> watched ${e.n} episode${e.n === 1 ? '' : 's'} of ${esc(e.title)} S${e.season}`;
+    let what;
+    if (e.kind === 'movie')
+      what = `<b>${esc(e.user_name)}</b> watched ${esc(e.title)}`;
+    else if (e.kind === 'folder_add')
+      what = `<b>${esc(e.user_name)}</b> added ${esc(e.title)} to 👥 ${esc(e.folder_name)} — progress now syncs`;
+    else if (e.kind === 'folder_remove')
+      what = `<b>${esc(e.user_name)}</b> removed ${esc(e.title)} from 👥 ${esc(e.folder_name)} — no longer syncing`;
+    else
+      what = `<b>${esc(e.user_name)}</b> watched ${e.n} episode${e.n === 1 ? '' : 's'} of ${esc(e.title)} S${e.season}`;
     const row = el(`<div class="feed-item">
       ${e.poster_path ? `<img loading="lazy" src="${IMG}w92${e.poster_path}" alt="">` : '<div class="noposter"></div>'}
       <div class="what">${what}</div>
@@ -505,6 +511,24 @@ async function renderFeed() {
 }
 
 /* ============================================================ folder manager */
+/* checkbox list of the OTHER profiles, to pick who a folder is shared with */
+function memberPickerHtml(prefix, checkedIds = []) {
+  const others = USERS.filter(u => !USER || u.id !== USER.id);
+  if (!others.length)
+    return '<p class="hint" style="margin-top:8px">No other profiles yet — add one to share folders.</p>';
+  return `<div style="margin-top:10px">
+    <label style="display:block;font-size:13px;color:var(--muted)">Share with (progress syncs between members):</label>
+    ${others.map(u => `
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer">
+        <input type="checkbox" class="${prefix}-member" value="${u.id}" style="width:auto"
+          ${checkedIds.includes(u.id) ? 'checked' : ''}> 👥 ${esc(u.name)}
+      </label>`).join('')}
+  </div>`;
+}
+function pickedMembers(container, prefix) {
+  return [...container.querySelectorAll(`.${prefix}-member:checked`)].map(c => parseInt(c.value, 10));
+}
+
 function openFolderManager() {
   const bd = document.getElementById('sheet-backdrop');
   const sheet = document.getElementById('sheet');
@@ -512,22 +536,51 @@ function openFolderManager() {
   sheet.innerHTML = '<div class="grabber"></div>';
   sheet.appendChild(closeBtn());
   sheet.appendChild(el('<h2 style="margin-bottom:4px">Folders</h2>'));
-  sheet.appendChild(el('<p class="hint" style="margin-bottom:14px">👥 shared folders are visible to everyone — and watch progress on their items <b>syncs between you</b>. Private folders are yours alone.</p>'));
+  sheet.appendChild(el('<p class="hint" style="margin-bottom:14px">👥 shared folders sync watch progress <b>between their members</b> — only the people you pick see them. Private folders are yours alone.</p>'));
 
   const list = el('<div></div>');
   for (const f of FOLDERS) {
-    const row = el(`<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #232838">
-      <span style="flex:1;font-weight:600">${f.shared ? '👥 ' : '🔒 '}${esc(f.name)}</span>
-      <span class="hint">${f.items} item${f.items === 1 ? '' : 's'}</span>
-      <button class="btn danger" style="padding:5px 10px;font-size:12px">Delete</button>
+    const memberNames = f.shared
+      ? f.members.filter(m => !USER || m.id !== USER.id).map(m => esc(m.name)).join(', ')
+      : '';
+    const row = el(`<div style="padding:10px 0;border-bottom:1px solid #232838">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="flex:1;font-weight:600">${f.shared ? '👥 ' : '🔒 '}${esc(f.name)}
+          ${memberNames ? `<span class="hint" style="font-weight:400">· with ${memberNames}</span>` : ''}</span>
+        <span class="hint">${f.items} item${f.items === 1 ? '' : 's'}</span>
+        <button class="btn" data-a="members" style="padding:5px 10px;font-size:12px">Members</button>
+        <button class="btn danger" data-a="del" style="padding:5px 10px;font-size:12px">Delete</button>
+      </div>
+      <div data-a="editor" style="display:none"></div>
     </div>`);
-    row.querySelector('button').onclick = async () => {
+    row.querySelector('[data-a=del]').onclick = async () => {
       if (!confirm(`Delete folder “${f.name}”? (Titles stay in the library.)`)) return;
       try {
         await api(`/folders/${f.id}?${userQ()}`, { method: 'DELETE' });
         await loadFolders();
         openFolderManager();
       } catch { toast('Could not delete'); }
+    };
+    const editor = row.querySelector('[data-a=editor]');
+    row.querySelector('[data-a=members]').onclick = () => {
+      if (editor.style.display !== 'none') { editor.style.display = 'none'; return; }
+      const current = f.members.map(m => m.id);
+      editor.innerHTML = `${memberPickerHtml('fm' + f.id, current)}
+        <div class="btnrow" style="margin-top:10px"><button class="btn primary">Save members</button></div>`;
+      editor.style.display = 'block';
+      editor.querySelector('button').onclick = async () => {
+        const ids = [USER.id, ...pickedMembers(editor, 'fm' + f.id)];
+        const adding = ids.some(id => !current.includes(id));
+        if (adding && f.items > 0 &&
+            !confirm(`New members get YOUR current progress on the ${f.items} title${f.items === 1 ? '' : 's'} in “${f.name}”. Continue?`))
+          return;
+        try {
+          await api(`/folders/${f.id}/members?${userQ()}`, { method: 'PUT', body: { member_ids: ids } });
+          await loadFolders();
+          openFolderManager();
+          toast('Members updated');
+        } catch { toast('Could not update members'); }
+      };
     };
     list.appendChild(row);
   }
@@ -539,9 +592,7 @@ function openFolderManager() {
       <div class="field" style="margin-top:16px">
         <label>New folder</label>
         <input id="nf-name" type="text" maxlength="40" placeholder="e.g. Watching together">
-        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
-          <input id="nf-shared" type="checkbox" style="width:auto"> 👥 Shared (progress syncs between users)
-        </label>
+        ${memberPickerHtml('nf')}
       </div>
       <div class="btnrow"><button class="btn primary" id="nf-create">Create</button></div>
     </div>`));
@@ -549,11 +600,11 @@ function openFolderManager() {
     const name = sheet.querySelector('#nf-name').value.trim();
     if (!name) return;
     try {
-      await api(`/folders?${userQ()}`, { method: 'POST', body: {
-        name, shared: sheet.querySelector('#nf-shared').checked } });
+      const f = await api(`/folders?${userQ()}`, { method: 'POST', body: {
+        name, member_ids: pickedMembers(sheet, 'nf') } });
       await loadFolders();
       openFolderManager();
-      toast('Folder created');
+      toast(f.shared ? 'Shared folder created 👥' : 'Folder created');
     } catch { toast('Could not create folder'); }
   };
   sheet.querySelector('#nf-name').addEventListener('keydown', e => {
@@ -747,7 +798,10 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
       c.onclick = async () => {
         const target = !inF();
         if (!target && f.shared &&
-            !confirm(`Remove from shared folder “${f.name}”?\n\nWatch progress on this title will STOP syncing between you.`))
+            !confirm(`Remove from shared folder “${f.name}”?\n\nProgress stops syncing — everyone keeps where they got to.`))
+          return;
+        if (target && f.shared &&
+            !confirm(`Add to shared folder “${f.name}” 👥?\n\nEveryone in it gets YOUR current progress on this title, and it stays synced from here on.`))
           return;
         try {
           await api(`/folders/${f.id}/items?${userQ()}`, { method: 'PUT',
@@ -773,24 +827,26 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
       <div class="field" id="new-folder-inline" style="display:none">
         <label>New folder</label>
         <input id="nf2-name" type="text" maxlength="40" placeholder="e.g. Watching together">
-        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
-          <input id="nf2-shared" type="checkbox" style="width:auto"> 👥 Shared (progress syncs between users)
-        </label>
+        ${memberPickerHtml('nf2')}
         <div class="btnrow"><button class="btn primary" id="nf2-create">Create &amp; add</button></div>
       </div>`);
     newForm.querySelector('#nf2-create').onclick = async (ev) => {
       const btn = ev.target;
       const name = newForm.querySelector('#nf2-name').value.trim();
       if (!name) return;
-      const shared = newForm.querySelector('#nf2-shared').checked;
+      const memberIds = pickedMembers(newForm, 'nf2');
+      if (memberIds.length &&
+          !confirm(`Share “${name}” 👥?\n\nMembers get YOUR current progress on this title, and it stays synced from here on.`))
+        return;
       btn.disabled = true;
       try {
-        const folder = await api(`/folders?${userQ()}`, { method: 'POST', body: { name, shared } });
+        const folder = await api(`/folders?${userQ()}`, { method: 'POST',
+          body: { name, member_ids: memberIds } });
         await api(`/folders/${folder.id}/items?${userQ()}`, { method: 'PUT',
           body: { item_id: item.id, member: true } });
         await loadFolders();
         item.folders = [...(item.folders || []), folder.id];
-        toast(shared ? 'Folder created — progress now syncs 👥' : 'Folder created and added');
+        toast(folder.shared ? 'Folder created — progress now syncs 👥' : 'Folder created and added');
         renderDetail(sheet, mediaType, d, fallbackTitle);
         if (tab === 'library') renderLibrary();
       } catch { btn.disabled = false; toast('Could not create folder'); }

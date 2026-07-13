@@ -65,8 +65,10 @@ CREATE TABLE IF NOT EXISTS stopped (
     PRIMARY KEY (item_id, user_id)
 );
 
--- Folders organize the library. owner_id NULL = shared folder (visible to
--- everyone); items in a shared folder get SYNCED watch progress.
+-- Folders organize the library. Visibility and progress sync are driven by
+-- folder_members: a folder with one member is private, with several it is
+-- shared BETWEEN THOSE MEMBERS ONLY and items in it get synced progress.
+-- owner_id records the creator (informational; any member can manage).
 CREATE TABLE IF NOT EXISTS folders (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT    NOT NULL,
@@ -78,6 +80,23 @@ CREATE TABLE IF NOT EXISTS folder_items (
     folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
     item_id   INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
     PRIMARY KEY (folder_id, item_id)
+);
+
+CREATE TABLE IF NOT EXISTS folder_members (
+    folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (folder_id, user_id)
+);
+
+-- Sync/unsync events (title added to / removed from a shared folder) so the
+-- feed can show them to that folder's members.
+CREATE TABLE IF NOT EXISTS folder_activity (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind      TEXT    NOT NULL CHECK (kind IN ('folder_add', 'folder_remove')),
+    user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    item_id   INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    at        TEXT    NOT NULL
 );
 """
 
@@ -113,6 +132,19 @@ def init_db():
         con.execute("ALTER TABLE users ADD COLUMN last_open_at TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # v4 migration: explicit folder membership. Folders that predate
+    # folder_members get rows here once: legacy shared (owner NULL) folders
+    # were visible to everyone, private ones only to their owner.
+    users = [r[0] for r in con.execute("SELECT id FROM users").fetchall()]
+    orphans = con.execute(
+        "SELECT id, owner_id FROM folders WHERE id NOT IN (SELECT folder_id FROM folder_members)"
+    ).fetchall()
+    for fid, owner in orphans:
+        targets = users if owner is None else [owner]
+        con.executemany(
+            "INSERT OR IGNORE INTO folder_members (folder_id, user_id) VALUES (?,?)",
+            [(fid, u) for u in targets],
+        )
     con.commit()
     con.close()
 
@@ -144,17 +176,54 @@ def current_user():
     return get_db().execute("SELECT * FROM users WHERE id=?", (int(uid),)).fetchone()
 
 
-def item_is_synced(db, item_id):
-    """True if the item sits in any shared folder → watch progress syncs to everyone."""
-    return db.execute(
-        """SELECT 1 FROM folder_items fi JOIN folders f ON f.id = fi.folder_id
-           WHERE fi.item_id = ? AND f.owner_id IS NULL LIMIT 1""",
-        (item_id,),
-    ).fetchone() is not None
+def synced_user_ids(db, item_id, user_id):
+    """Users whose progress on this item moves together with user_id's:
+    everyone in shared folders that contain the item AND user_id belongs to.
+    Returns just [user_id] when the item isn't shared with them."""
+    rows = db.execute(
+        """SELECT DISTINCT fm.user_id
+           FROM folder_items fi
+           JOIN folder_members me ON me.folder_id = fi.folder_id AND me.user_id = :u
+           JOIN folder_members fm ON fm.folder_id = fi.folder_id
+           WHERE fi.item_id = :i""",
+        {"u": user_id, "i": item_id},
+    ).fetchall()
+    ids = [r["user_id"] for r in rows]
+    return ids if ids else [user_id]
 
 
-def all_user_ids(db):
-    return [r["id"] for r in db.execute("SELECT id FROM users").fetchall()]
+def folder_member_ids(db, folder_id):
+    return [r["user_id"] for r in db.execute(
+        "SELECT user_id FROM folder_members WHERE folder_id=?", (folder_id,)
+    ).fetchall()]
+
+
+def copy_progress(db, item_id, from_user, to_users):
+    """Replace to_users' progress on an item with from_user's (episodes and
+    movie watched flag) — the folder tracks one shared position."""
+    targets = [u for u in to_users if u != from_user]
+    if not targets:
+        return
+    eps = db.execute(
+        "SELECT season, episode, watched_at FROM episodes WHERE item_id=? AND user_id=?",
+        (item_id, from_user),
+    ).fetchall()
+    mv = db.execute(
+        "SELECT watched_at FROM movie_watches WHERE item_id=? AND user_id=?",
+        (item_id, from_user),
+    ).fetchone()
+    for u in targets:
+        db.execute("DELETE FROM episodes WHERE item_id=? AND user_id=?", (item_id, u))
+        db.execute("DELETE FROM movie_watches WHERE item_id=? AND user_id=?", (item_id, u))
+        db.executemany(
+            "INSERT INTO episodes (item_id, user_id, season, episode, watched_at) VALUES (?,?,?,?,?)",
+            [(item_id, u, e["season"], e["episode"], e["watched_at"]) for e in eps],
+        )
+        if mv:
+            db.execute(
+                "INSERT INTO movie_watches (item_id, user_id, watched_at) VALUES (?,?,?)",
+                (item_id, u, mv["watched_at"]),
+            )
 
 
 # ---------------------------------------------------------------- users
@@ -303,8 +372,8 @@ def update_item(item_id):
     if not row:
         return jsonify(error="not found"), 404
     if "watched" in data:
-        # items in a shared folder sync watch state to every user
-        uids = all_user_ids(db) if item_is_synced(db, item_id) else [user["id"]]
+        # items in a shared folder sync watch state to that folder's members
+        uids = synced_user_ids(db, item_id, user["id"])
         if data["watched"]:
             db.executemany(
                 "INSERT OR IGNORE INTO movie_watches (item_id, user_id, watched_at) VALUES (?,?,?)",
@@ -382,8 +451,8 @@ def set_episodes(item_id):
 
     ts = now()
     uid = user["id"]
-    # items in a shared folder sync watch state to every user
-    uids = all_user_ids(db) if item_is_synced(db, item_id) else [uid]
+    # items in a shared folder sync watch state to that folder's members
+    uids = synced_user_ids(db, item_id, uid)
     if watched:
         db.executemany(
             "INSERT OR IGNORE INTO episodes (item_id, user_id, season, episode, watched_at) VALUES (?,?,?,?,?)",
@@ -403,27 +472,52 @@ def set_episodes(item_id):
 
 # ---------------------------------------------------------------- folders
 
+def folder_to_dict(db, row):
+    members = db.execute(
+        """SELECT u.id, u.name FROM folder_members fm
+           JOIN users u ON u.id = fm.user_id
+           WHERE fm.folder_id = ? ORDER BY u.id""",
+        (row["id"],),
+    ).fetchall()
+    items = db.execute(
+        "SELECT COUNT(*) AS c FROM folder_items WHERE folder_id=?", (row["id"],)
+    ).fetchone()["c"]
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "shared": len(members) > 1,
+        "items": items,
+        "members": [{"id": m["id"], "name": m["name"]} for m in members],
+    }
+
+
+def user_is_member(db, folder_id, user_id):
+    return db.execute(
+        "SELECT 1 FROM folder_members WHERE folder_id=? AND user_id=?", (folder_id, user_id)
+    ).fetchone() is not None
+
+
 @app.get("/api/folders")
 def list_folders():
     user = current_user()
     if user is None:
         return jsonify(error="valid ?user=<id> is required"), 400
-    rows = get_db().execute(
-        """SELECT f.id, f.name, f.owner_id,
-                  (SELECT COUNT(*) FROM folder_items fi WHERE fi.folder_id = f.id) AS items
-           FROM folders f
-           WHERE f.owner_id IS NULL OR f.owner_id = ?
-           ORDER BY f.owner_id IS NOT NULL, f.name""",
+    db = get_db()
+    rows = db.execute(
+        """SELECT f.* FROM folders f
+           JOIN folder_members me ON me.folder_id = f.id
+           WHERE me.user_id = ? ORDER BY f.name""",
         (user["id"],),
     ).fetchall()
-    return jsonify([
-        {"id": r["id"], "name": r["name"], "shared": r["owner_id"] is None, "items": r["items"]}
-        for r in rows
-    ])
+    out = [folder_to_dict(db, r) for r in rows]
+    out.sort(key=lambda f: (not f["shared"], f["name"].lower()))
+    return jsonify(out)
 
 
 @app.post("/api/folders")
 def add_folder():
+    """Body: {"name", "member_ids": [user ids to share with]} — the creator is
+    always a member. Legacy {"shared": true} still means share with everyone."""
     user = current_user()
     if user is None:
         return jsonify(error="valid ?user=<id> is required"), 400
@@ -431,14 +525,70 @@ def add_folder():
     name = str(data.get("name", "")).strip()
     if not name or len(name) > 40:
         return jsonify(error="name is required (max 40 chars)"), 400
-    shared = bool(data.get("shared"))
     db = get_db()
+    member_ids = data.get("member_ids")
+    if member_ids is not None:
+        if not isinstance(member_ids, list) or not all(isinstance(m, int) for m in member_ids):
+            return jsonify(error="member_ids must be a list of user ids"), 400
+        known = {r["id"] for r in db.execute("SELECT id FROM users").fetchall()}
+        if not set(member_ids) <= known:
+            return jsonify(error="unknown user in member_ids"), 400
+        members = set(member_ids) | {user["id"]}
+    elif data.get("shared"):
+        members = {r["id"] for r in db.execute("SELECT id FROM users").fetchall()}
+    else:
+        members = {user["id"]}
     cur = db.execute(
         "INSERT INTO folders (name, owner_id, created_at) VALUES (?,?,?)",
-        (name, None if shared else user["id"], now()),
+        (name, user["id"], now()),
+    )
+    db.executemany(
+        "INSERT INTO folder_members (folder_id, user_id) VALUES (?,?)",
+        [(cur.lastrowid, u) for u in members],
     )
     db.commit()
-    return jsonify(id=cur.lastrowid, name=name, shared=shared, items=0), 201
+    row = db.execute("SELECT * FROM folders WHERE id=?", (cur.lastrowid,)).fetchone()
+    return jsonify(folder_to_dict(db, row)), 201
+
+
+@app.put("/api/folders/<int:folder_id>/members")
+def set_folder_members(folder_id):
+    """Body: {"member_ids": [...]}. Any member can edit. New members' progress
+    on the folder's titles is set to the acting user's (the shared position)."""
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    data = request.get_json(silent=True) or {}
+    member_ids = data.get("member_ids")
+    if not isinstance(member_ids, list) or not member_ids \
+            or not all(isinstance(m, int) for m in member_ids):
+        return jsonify(error="member_ids (non-empty list of user ids) is required"), 400
+    db = get_db()
+    row = db.execute("SELECT * FROM folders WHERE id=?", (folder_id,)).fetchone()
+    if not row:
+        return jsonify(error="not found"), 404
+    if not user_is_member(db, folder_id, user["id"]):
+        return jsonify(error="not your folder"), 403
+    known = {r["id"] for r in db.execute("SELECT id FROM users").fetchall()}
+    if not set(member_ids) <= known:
+        return jsonify(error="unknown user in member_ids"), 400
+    before = set(folder_member_ids(db, folder_id))
+    after = set(member_ids)
+    db.execute("DELETE FROM folder_members WHERE folder_id=?", (folder_id,))
+    db.executemany(
+        "INSERT INTO folder_members (folder_id, user_id) VALUES (?,?)",
+        [(folder_id, u) for u in after],
+    )
+    # bring newcomers to the folder's shared position on every title in it
+    joined = after - before
+    if joined:
+        item_ids = [r["item_id"] for r in db.execute(
+            "SELECT item_id FROM folder_items WHERE folder_id=?", (folder_id,)
+        ).fetchall()]
+        for iid in item_ids:
+            copy_progress(db, iid, user["id"], joined)
+    db.commit()
+    return jsonify(folder_to_dict(db, row))
 
 
 @app.delete("/api/folders/<int:folder_id>")
@@ -450,7 +600,7 @@ def delete_folder(folder_id):
     row = db.execute("SELECT * FROM folders WHERE id=?", (folder_id,)).fetchone()
     if not row:
         return jsonify(error="not found"), 404
-    if row["owner_id"] is not None and row["owner_id"] != user["id"]:
+    if not user_is_member(db, folder_id, user["id"]):
         return jsonify(error="not your folder"), 403
     db.execute("DELETE FROM folders WHERE id=?", (folder_id,))
     db.commit()
@@ -459,7 +609,9 @@ def delete_folder(folder_id):
 
 @app.put("/api/folders/<int:folder_id>/items")
 def set_folder_item(folder_id):
-    """Body: {"item_id": N, "member": true|false}"""
+    """Body: {"item_id": N, "member": true|false}. Adding to a shared folder
+    copies the adding user's progress to every member (the shared position)
+    and logs a feed event; removing logs one too but leaves progress as-is."""
     user = current_user()
     if user is None:
         return jsonify(error="valid ?user=<id> is required"), 400
@@ -472,19 +624,35 @@ def set_folder_item(folder_id):
     folder = db.execute("SELECT * FROM folders WHERE id=?", (folder_id,)).fetchone()
     if not folder or not db.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone():
         return jsonify(error="not found"), 404
-    if folder["owner_id"] is not None and folder["owner_id"] != user["id"]:
+    if not user_is_member(db, folder_id, user["id"]):
         return jsonify(error="not your folder"), 403
+    members = folder_member_ids(db, folder_id)
+    shared = len(members) > 1
     if member:
+        already = db.execute(
+            "SELECT 1 FROM folder_items WHERE folder_id=? AND item_id=?", (folder_id, item_id)
+        ).fetchone() is not None
         db.execute(
             "INSERT OR IGNORE INTO folder_items (folder_id, item_id) VALUES (?,?)",
             (folder_id, item_id),
         )
+        if shared and not already:
+            copy_progress(db, item_id, user["id"], members)
+            db.execute(
+                "INSERT INTO folder_activity (kind, user_id, item_id, folder_id, at) VALUES (?,?,?,?,?)",
+                ("folder_add", user["id"], item_id, folder_id, now()),
+            )
     else:
-        db.execute(
+        removed = db.execute(
             "DELETE FROM folder_items WHERE folder_id=? AND item_id=?", (folder_id, item_id)
-        )
+        ).rowcount
+        if shared and removed:
+            db.execute(
+                "INSERT INTO folder_activity (kind, user_id, item_id, folder_id, at) VALUES (?,?,?,?,?)",
+                ("folder_remove", user["id"], item_id, folder_id, now()),
+            )
     db.commit()
-    return jsonify(ok=True)
+    return jsonify(ok=True, synced=shared)
 
 
 # ---------------------------------------------------------------- feed
@@ -524,6 +692,20 @@ def feed():
     ).fetchall()
     for r in mv_rows:
         events.append({**dict(r), "kind": "movie"})
+    # sync/unsync events for shared folders this user belongs to
+    fa_rows = db.execute(
+        """SELECT u.name AS user_name, i.id AS item_id, i.tmdb_id, i.media_type,
+                  i.title, i.poster_path, f.name AS folder_name, a.kind, a.at
+           FROM folder_activity a
+           JOIN users u ON u.id = a.user_id
+           JOIN items i ON i.id = a.item_id
+           JOIN folders f ON f.id = a.folder_id
+           JOIN folder_members me ON me.folder_id = a.folder_id AND me.user_id = :me
+           WHERE a.user_id != :me
+           ORDER BY a.at DESC LIMIT 50""",
+        {"me": user["id"]},
+    ).fetchall()
+    events.extend(dict(r) for r in fa_rows)
     events.sort(key=lambda e: e["at"], reverse=True)
     return jsonify(events[:50])
 
