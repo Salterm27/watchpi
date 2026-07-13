@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 nohup.out
 .DS_Store
+.pytest_cache/
