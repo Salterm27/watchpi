@@ -101,16 +101,30 @@ via the name chip in the header.
 ## Folders
 
 Organize the library with folders (chips at the top of the Library tab).
-Private folders (🔒) are visible only to their owner. Shared folders (👥) are
-visible to everyone — and watch progress on their items **syncs between all
-profiles** (mark it watched, it's watched for both of you). Add/remove a title
-from folders inside its detail sheet.
+When creating a folder you pick who it's shared with — private folders (🔒)
+are yours alone, shared folders (👥) are visible **only to their members**
+and any member can manage them (edit members, add/remove titles, delete).
+
+Watch progress on a shared folder's titles **syncs between its members** —
+the folder tracks one shared position:
+
+- **Adding a title** to a shared folder copies the adder's current progress
+  to every member (the app asks for confirmation, since it replaces theirs).
+- **While shared**, every mark/unmark propagates to all members.
+- **Removing a title** (or leaving) stops the sync; everyone keeps the
+  progress they had at that moment.
+- **New members** joining get the folder's current position on its titles.
+
+Add/remove a title from folders inside its detail sheet ("＋ New folder"
+there creates one on the spot); edit members via Library → ＋ Folders.
 
 ## Feed
 
 The Feed tab shows what other profiles have been watching, newest first,
 grouped per show/season/day ("Vale watched 3 episodes of Severance S1 · 2h ago").
-Derived from watch timestamps — no extra tracking.
+Members of shared folders also see sync events there ("Ana added Severance
+to 👥 Us two — progress now syncs"). Derived from watch timestamps plus a
+small folder-activity log.
 
 ## New-episode alerts
 
@@ -158,10 +172,11 @@ watch timestamp for the requesting profile — used for the Series sort).
 | DELETE | /api/library/:id                  | —                                                 |
 | GET    | /api/library/:id/episodes (u)     | —                                                 |
 | PUT    | /api/library/:id/episodes (u)     | `{episodes: [{season, episode}], watched: bool}`  |
-| GET    | /api/folders (u)                  | —                                                 |
-| POST   | /api/folders (u)                  | `{name, shared: bool}`                            |
+| GET    | /api/folders (u)                  | — (folders you're a member of, incl. `members`)   |
+| POST   | /api/folders (u)                  | `{name, member_ids: [user ids]}` (creator always included) |
+| PUT    | /api/folders/:id/members (u)      | `{member_ids: [...]}` (any member; newcomers get your progress) |
 | DELETE | /api/folders/:id (u)              | —                                                 |
-| PUT    | /api/folders/:id/items (u)        | `{item_id, member: bool}`                         |
+| PUT    | /api/folders/:id/items (u)        | `{item_id, member: bool}` (add copies your progress to members) |
 | GET    | /api/feed (u)                     | —                                                 |
 | PUT    | /api/users/:id/seen               | `{}` → returns previous open time                 |
 | GET    | /api/config                       | —                                                 |
