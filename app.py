@@ -332,7 +332,10 @@ def update_item(item_id):
     st = db.execute(
         "SELECT 1 FROM stopped WHERE item_id=? AND user_id=?", (item_id, user["id"])
     ).fetchone() is not None
-    return jsonify(item_to_dict(row, w, 0, st))
+    ep_count = db.execute(
+        "SELECT COUNT(*) AS c FROM episodes WHERE item_id=? AND user_id=?", (item_id, user["id"])
+    ).fetchone()["c"]
+    return jsonify(item_to_dict(row, w, ep_count, st))
 
 
 # ---------------------------------------------------------------- episodes

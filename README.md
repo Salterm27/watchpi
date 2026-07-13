@@ -121,7 +121,11 @@ banner lists them at the top of the library.
 ## Auto-deploy (CI/CD)
 
 The Pi polls GitHub every 10 minutes and deploys `main` automatically:
-new commits → `git reset --hard` → pip install → service restart.
+new commits → `git reset --hard` → pip install → service restart → health
+check. If `/api/health` doesn't answer within ~20s of the restart, the deploy
+**rolls back** to the previously running commit and restarts again — a bad
+push can't leave the app down. Look for "ROLLED BACK" in
+`journalctl -u watchpi-deploy` if a deploy didn't stick.
 One-time setup on the Pi:
 
 ```bash
@@ -139,16 +143,18 @@ only source of truth.
 
 ## API (for your launcher app or future scripts)
 
-Endpoints marked (u) require `?user=<profile id>`.
+Endpoints marked (u) require `?user=<profile id>`. Library items include
+`watched`, `watched_episodes`, `stopped` and `last_watched_at` (most recent
+watch timestamp for the requesting profile — used for the Series sort).
 
 | Method | Path                              | Body                                              |
 |--------|-----------------------------------|---------------------------------------------------|
 | GET    | /api/users                        | —                                                 |
 | POST   | /api/users                        | `{name}`                                          |
 | DELETE | /api/users/:id                    | —                                                 |
-| GET    | /api/library (u)                  | —                                                 |
+| GET    | /api/library (u)                  | — (`&include=episodes` adds per-item episode lists) |
 | POST   | /api/library                      | `{tmdb_id, media_type, title, poster_path}`       |
-| PATCH  | /api/library/:id (u)              | `{watched: bool}` (movies)                        |
+| PATCH  | /api/library/:id (u)              | `{watched?: bool}` (movies) and/or `{stopped?: bool}` |
 | DELETE | /api/library/:id                  | —                                                 |
 | GET    | /api/library/:id/episodes (u)     | —                                                 |
 | PUT    | /api/library/:id/episodes (u)     | `{episodes: [{season, episode}], watched: bool}`  |
@@ -161,3 +167,16 @@ Endpoints marked (u) require `?user=<profile id>`.
 | GET    | /api/config                       | —                                                 |
 | PUT    | /api/config                       | `{tmdb_key?, region?}`                            |
 | GET    | /api/health                       | —                                                 |
+
+## Tests
+
+The API has a pytest suite (`tests/`) covering users, the shared library,
+episode tracking, folder visibility/permissions and shared-folder sync.
+Run it before pushing — remember `main` auto-deploys to the Pi:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
+
+Tests run against a throwaway SQLite file; they never touch `data/watchpi.db`.
