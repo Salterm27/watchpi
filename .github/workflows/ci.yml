@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # same as the Pi (Raspberry Pi OS bookworm)
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: API tests
+        run: python -m pytest tests/ -v
+      - name: Frontend JS syntax check
+        run: |
+          sed -n '/<script>/,/<\/script>/p' static/index.html | sed '1d;$d' > /tmp/app.js
+          node --check /tmp/app.js
+      - name: Deploy script syntax check
+        run: bash -n deploy/autodeploy.sh
+
+  # Failures on main get a persistent, visible alert: one open issue labeled
+  # ci-failure, updated with each failing run instead of spamming new ones.
+  # (PR failures already show as a red X on the PR itself.)
+  alert:
+    needs: test
+    if: failure() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `CI failed on \`main\` at ${context.sha.substring(0, 7)}.`,
+              '',
+              `Run: ${runUrl}`,
+              '',
+              "The Pi's autodeploy health-gate rolls back if the app itself broke, " +
+              'but main stays broken (and every deploy keeps rolling back) until this is fixed.',
+            ].join('\n');
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              labels: 'ci-failure', state: 'open',
+            });
+            if (open.data.length) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: open.data[0].number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: '🚨 CI failing on main', body, labels: ['ci-failure'],
+              });
+            }
