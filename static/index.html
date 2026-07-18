@@ -612,6 +612,117 @@ function openFolderManager() {
   });
 }
 
+/* ============================================================ suggestions
+   The "engine" is TMDB's own per-title recommendations endpoint (the data
+   behind every "More like this" row), seeded with the titles across your
+   folders — no self-hosted recommender needed. Tune it via SUGGEST below.
+   Results are cached on the Pi per profile so every device shares them, and
+   rebuilt on Fridays — only when the seed titles changed since last build. */
+const SUGGEST = { maxSeeds: 12, perSeed: 12, maxResults: 24 };
+let SUGGESTIONS = null;   // {built_at, seed_hash, items} — session copy of the Pi cache
+
+function suggestionSeeds() {
+  const inFolders = library.filter(i => (i.folders || []).length);
+  const seeds = (inFolders.length ? inFolders : library).slice();
+  seeds.sort((a, b) => (b.last_watched_at || b.added_at || '')
+    .localeCompare(a.last_watched_at || a.added_at || ''));
+  return seeds.slice(0, SUGGEST.maxSeeds);
+}
+function seedHashOf(seeds) {
+  const s = seeds.map(x => `${x.media_type}:${x.tmdb_id}`).sort().join(',');
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(16) + ':' + seeds.length;
+}
+function lastFriday() {
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() - 5 + 7) % 7));
+  return d;
+}
+
+async function buildSuggestions(seeds, hash) {
+  const cand = {};   // "type:id" -> {r, mt, n: seeds that recommend it, rank}
+  await Promise.all(seeds.map(async s => {
+    try {
+      const d = await tmdb(`/${s.media_type}/${s.tmdb_id}/recommendations`);
+      (d.results || []).slice(0, SUGGEST.perSeed).forEach((r, idx) => {
+        const mt = r.media_type || s.media_type;
+        if (mt !== 'movie' && mt !== 'tv') return;
+        const key = `${mt}:${r.id}`;
+        if (libIndex[key]) return;   // already in the library
+        const e = cand[key] || (cand[key] = { r, mt, n: 0, rank: 0 });
+        e.n += 1; e.rank += SUGGEST.perSeed - idx;
+      });
+    } catch { /* one failed seed shouldn't kill the build */ }
+  }));
+  const items = Object.values(cand)
+    .sort((a, b) => (b.n - a.n) || (b.rank - a.rank)
+      || ((b.r.vote_average || 0) - (a.r.vote_average || 0)))
+    .slice(0, SUGGEST.maxResults)
+    .map(e => ({ tmdb_id: e.r.id, media_type: e.mt, title: e.r.title || e.r.name,
+                 poster_path: e.r.poster_path, date: e.r.release_date || e.r.first_air_date || '' }));
+  await api(`/suggestions?${userQ()}`, { method: 'PUT', body: { seed_hash: hash, items } });
+  return { built_at: new Date().toISOString(), seed_hash: hash, items };
+}
+
+/* rebuild when there's no cache yet, or on/after Friday IF the seeds changed */
+async function refreshSuggestions(force = false) {
+  if (!USER || !S.key) return null;
+  try { if (!library.length) await loadLibrary(); } catch { return null; }
+  const seeds = suggestionSeeds();
+  if (!seeds.length) return null;
+  const hash = seedHashOf(seeds);
+  let cache = SUGGESTIONS;
+  if (!cache) { try { cache = await api(`/suggestions?${userQ()}`); } catch { return null; } }
+  const stale = !cache.items.length
+    || (cache.seed_hash !== hash && new Date(cache.built_at) < lastFriday());
+  if (force || stale) {
+    try { cache = await buildSuggestions(seeds, hash); } catch { /* keep the old batch */ }
+  }
+  SUGGESTIONS = cache;
+  return cache;
+}
+
+async function renderSuggestions() {
+  const box = document.getElementById('results');
+  if (!box) return;
+  box.innerHTML = '<div class="spin">Finding suggestions…</div>';
+  const sug = await refreshSuggestions();
+  const q = document.getElementById('q');
+  if (!q || q.value.trim()) return;   // user started a search meanwhile
+  const fresh = (sug ? sug.items : []).filter(r => !libIndex[`${r.media_type}:${r.tmdb_id}`]);
+  if (!fresh.length) {
+    box.innerHTML = `<div class="empty">Type to search TMDB.<br>
+      <span style="font-size:12px">Suggestions appear here once your folders have a few titles.</span></div>`;
+    return;
+  }
+  box.innerHTML = '';
+  const head = el(`<div style="display:flex;align-items:center;gap:8px">
+    <h3 class="section" style="margin:14px 0 4px;flex:1">✨ Suggested for you</h3>
+    <button class="btn" id="sug-refresh" style="padding:5px 10px;font-size:12px">Refresh</button></div>`);
+  head.querySelector('#sug-refresh').onclick = async () => {
+    box.innerHTML = '<div class="spin">Refreshing…</div>';
+    await refreshSuggestions(true);
+    renderSuggestions();
+  };
+  box.appendChild(head);
+  box.appendChild(el('<p class="hint" style="margin-bottom:12px">Based on the titles across your folders · refreshes on Fridays when your library changed.</p>'));
+  const grid = el('<div class="grid"></div>');
+  for (const r of fresh) {
+    const card = el(`<div class="card">
+      ${r.poster_path
+        ? `<img loading="lazy" src="${IMG}w185${r.poster_path}" alt="">`
+        : `<div class="noposter">${esc(r.title)}</div>`}
+      <span class="badge">${r.media_type}</span>
+      <div class="title">${esc(r.title)}</div>
+      <div class="sub">${year(r.date)}</div>
+    </div>`);
+    card.onclick = () => openDetail(r.media_type, r.tmdb_id, r.title);
+    grid.appendChild(card);
+  }
+  box.appendChild(grid);
+}
+
 /* ============================================================ search view */
 function renderSearch() {
   const main = document.getElementById('main');
@@ -619,17 +730,19 @@ function renderSearch() {
     <div class="searchbar">
       <input id="q" type="search" placeholder="Search movies & TV…" autocomplete="off">
     </div>
-    <div id="results"><div class="empty">Type to search TMDB.<br>
-      <span style="font-size:12px">Results come straight from the internet — the Pi never sees them.</span></div></div>`;
+    <div id="results"></div>`;
   const q = document.getElementById('q');
   let timer;
   q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => doSearch(q.value), 350); });
   q.focus();
+  if (S.key) renderSuggestions();
+  else document.getElementById('results').innerHTML =
+    '<div class="empty">Add your TMDB API key in ⚙ settings first.</div>';
 }
 
 async function doSearch(query) {
   const box = document.getElementById('results');
-  if (!query.trim()) { box.innerHTML = ''; return; }
+  if (!query.trim()) { renderSuggestions(); return; }
   box.innerHTML = '<div class="spin">Searching…</div>';
   let data;
   try {

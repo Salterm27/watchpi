@@ -126,6 +126,18 @@ Members of shared folders also see sync events there ("Ana added Severance
 to 👥 Us two — progress now syncs"). Derived from watch timestamps plus a
 small folder-activity log.
 
+## Suggestions
+
+The Search tab shows "✨ Suggested for you" while the box is empty. The
+engine is TMDB's own per-title recommendations (the data behind every
+"More like this" row), seeded with the titles across your folders: each
+seed's recommendations are aggregated, titles recommended by several of
+your seeds rank first, and anything already in the library is dropped.
+Results are cached on the Pi per profile (`/api/suggestions`) so every
+device shares one batch; it rebuilds on Fridays and only if your
+folders/library changed since the last build (a Refresh button forces it).
+Tune the knobs in the `SUGGEST` constant in `static/index.html`.
+
 ## New-episode alerts
 
 On open, the app records the visit and asks TMDB (browser-side, as always)
@@ -178,6 +190,8 @@ watch timestamp for the requesting profile — used for the Series sort).
 | DELETE | /api/folders/:id (u)              | —                                                 |
 | PUT    | /api/folders/:id/items (u)        | `{item_id, member: bool}` (add copies your progress to members) |
 | GET    | /api/feed (u)                     | —                                                 |
+| GET    | /api/suggestions (u)              | — cached suggestion batch `{built_at, seed_hash, items}` |
+| PUT    | /api/suggestions (u)              | `{seed_hash, items}` (browser-built, see Suggestions) |
 | PUT    | /api/users/:id/seen               | `{}` → returns previous open time                 |
 | GET    | /api/config                       | —                                                 |
 | PUT    | /api/config                       | `{tmdb_key?, region?}`                            |

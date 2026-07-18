@@ -298,3 +298,22 @@ def test_private_folder_add_makes_no_feed_event(client):
     fid = r.get_json()["id"]
     put_in_folder(client, ana, fid, item)
     assert client.get(f"/api/feed?user={bob}").get_json() == []
+
+
+# ---------------------------------------------------------------- suggestions
+
+def test_suggestions_roundtrip_and_isolation(client):
+    ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
+    assert client.get(f"/api/suggestions?user={ana}").get_json()["items"] == []
+    items = [{"tmdb_id": 42, "media_type": "tv", "title": "Dark", "poster_path": None}]
+    r = client.put(f"/api/suggestions?user={ana}", json={"seed_hash": "abc", "items": items})
+    assert r.status_code == 200
+    got = client.get(f"/api/suggestions?user={ana}").get_json()
+    assert got["seed_hash"] == "abc" and got["items"] == items and got["built_at"]
+    assert client.get(f"/api/suggestions?user={bob}").get_json()["items"] == []
+
+
+def test_suggestions_validation(client):
+    ana = make_user(client, "Ana")
+    assert client.get("/api/suggestions").status_code == 400
+    assert client.put(f"/api/suggestions?user={ana}", json={"items": "nope"}).status_code == 400

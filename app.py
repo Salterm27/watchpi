@@ -98,6 +98,16 @@ CREATE TABLE IF NOT EXISTS folder_activity (
     folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
     at        TEXT    NOT NULL
 );
+
+-- Per-user cache of search-tab suggestions. The browser builds them from
+-- TMDB's recommendation endpoints (seeded by the user's folder items) and
+-- stores them here so every device shares one weekly refresh.
+CREATE TABLE IF NOT EXISTS suggestions (
+    user_id   INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    built_at  TEXT NOT NULL,
+    seed_hash TEXT NOT NULL,
+    data      TEXT NOT NULL
+);
 """
 
 
@@ -708,6 +718,47 @@ def feed():
     events.extend(dict(r) for r in fa_rows)
     events.sort(key=lambda e: e["at"], reverse=True)
     return jsonify(events[:50])
+
+
+# ---------------------------------------------------------------- suggestions
+
+@app.get("/api/suggestions")
+def get_suggestions():
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    row = get_db().execute(
+        "SELECT built_at, seed_hash, data FROM suggestions WHERE user_id=?", (user["id"],)
+    ).fetchone()
+    if not row:
+        return jsonify(built_at=None, seed_hash=None, items=[])
+    try:
+        items = json.loads(row["data"])
+    except ValueError:
+        items = []
+    return jsonify(built_at=row["built_at"], seed_hash=row["seed_hash"], items=items)
+
+
+@app.put("/api/suggestions")
+def put_suggestions():
+    """Body: {"seed_hash": str, "items": [...]} — browser-built, stored per user."""
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    data = request.get_json(silent=True) or {}
+    seed_hash = str(data.get("seed_hash", ""))
+    items = data.get("items")
+    if not seed_hash or not isinstance(items, list):
+        return jsonify(error="seed_hash (str) and items (list) are required"), 400
+    db = get_db()
+    db.execute(
+        """INSERT INTO suggestions (user_id, built_at, seed_hash, data) VALUES (?,?,?,?)
+           ON CONFLICT(user_id) DO UPDATE SET built_at=excluded.built_at,
+             seed_hash=excluded.seed_hash, data=excluded.data""",
+        (user["id"], now(), seed_hash, json.dumps(items)),
+    )
+    db.commit()
+    return jsonify(ok=True, built_at=now())
 
 
 # ---------------------------------------------------------------- last open
