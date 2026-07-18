@@ -407,6 +407,12 @@ async function renderLibrary() {
     : library.filter(i => (i.folders || []).includes(currentFolder));
   if (currentType !== 'all') visible = visible.filter(i => i.media_type === currentType);
 
+  /* inside a folder: latest activity first (never-watched fall back to added date) */
+  if (currentFolder !== null) {
+    visible = [...visible].sort((a, b) =>
+      (b.last_watched_at || b.added_at || '').localeCompare(a.last_watched_at || a.added_at || ''));
+  }
+
   /* series sort: actively-watching shows first, then by most recent watch activity */
   if (currentType === 'tv') {
     const isActive = i => i.watched_episodes > 0 && !i.stopped;
