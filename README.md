@@ -138,6 +138,19 @@ device shares one batch; it rebuilds on Fridays and only if your
 folders/library changed since the last build (a Refresh button forces it).
 Tune the knobs in the `SUGGEST` constant in `static/index.html`.
 
+## Games
+
+The library can track video games too. Metadata comes from
+[RAWG](https://rawg.io) the same way movie/TV data comes from TMDB — straight
+from the browser, the Pi never calls out. Grab a free key at
+rawg.io/apidocs and paste it in ⚙ Settings (optional: without it, games
+simply don't appear in search). Games are tracked like movies: a
+**✓ finished** flag plus a personal **⏸ shelved** state that greys the cover;
+they join folders, shared-progress sync, the Games filter chip, and the feed
+("Ana finished Hades"). The detail sheet shows platforms, Metacritic and
+average playtime instead of streaming providers. Suggestions stay movie/TV
+only (RAWG's similar-games endpoint is paid-tier).
+
 ## New-episode alerts
 
 On open, the app records the visit and asks TMDB (browser-side, as always)
@@ -179,7 +192,7 @@ watch timestamp for the requesting profile — used for the Series sort).
 | POST   | /api/users                        | `{name}`                                          |
 | DELETE | /api/users/:id                    | —                                                 |
 | GET    | /api/library (u)                  | — (`&include=episodes` adds per-item episode lists) |
-| POST   | /api/library                      | `{tmdb_id, media_type, title, poster_path}`       |
+| POST   | /api/library                      | `{tmdb_id, media_type, title, poster_path}` (`media_type`: movie/tv/game; RAWG id for games) |
 | PATCH  | /api/library/:id (u)              | `{watched?: bool}` (movies) and/or `{stopped?: bool}` |
 | DELETE | /api/library/:id                  | —                                                 |
 | GET    | /api/library/:id/episodes (u)     | —                                                 |
@@ -194,7 +207,7 @@ watch timestamp for the requesting profile — used for the Series sort).
 | PUT    | /api/suggestions (u)              | `{seed_hash, items}` (browser-built, see Suggestions) |
 | PUT    | /api/users/:id/seen               | `{}` → returns previous open time                 |
 | GET    | /api/config                       | —                                                 |
-| PUT    | /api/config                       | `{tmdb_key?, region?}`                            |
+| PUT    | /api/config                       | `{tmdb_key?, region?, rawg_key?}`                 |
 | GET    | /api/health                       | —                                                 |
 
 ## Tests

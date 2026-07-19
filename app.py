@@ -30,10 +30,11 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 -- The library is SHARED between users; watch progress is per user.
+-- tmdb_id holds the RAWG id for games (namespaced by media_type).
 CREATE TABLE IF NOT EXISTS items (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     tmdb_id     INTEGER NOT NULL,
-    media_type  TEXT    NOT NULL CHECK (media_type IN ('movie', 'tv')),
+    media_type  TEXT    NOT NULL CHECK (media_type IN ('movie', 'tv', 'game')),
     title       TEXT    NOT NULL,
     poster_path TEXT,
     added_at    TEXT    NOT NULL,
@@ -155,6 +156,29 @@ def init_db():
             "INSERT OR IGNORE INTO folder_members (folder_id, user_id) VALUES (?,?)",
             [(fid, u) for u in targets],
         )
+    # v5 migration: allow media_type 'game'. The CHECK constraint can't be
+    # altered in SQLite, so rebuild the items table; child tables reference
+    # it by name and survive the rename.
+    items_sql = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='items'"
+    ).fetchone()[0]
+    if "'game'" not in items_sql:
+        con.executescript("""
+            PRAGMA foreign_keys=OFF;
+            CREATE TABLE items_new (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                tmdb_id     INTEGER NOT NULL,
+                media_type  TEXT    NOT NULL CHECK (media_type IN ('movie', 'tv', 'game')),
+                title       TEXT    NOT NULL,
+                poster_path TEXT,
+                added_at    TEXT    NOT NULL,
+                UNIQUE (tmdb_id, media_type)
+            );
+            INSERT INTO items_new SELECT * FROM items;
+            DROP TABLE items;
+            ALTER TABLE items_new RENAME TO items;
+            PRAGMA foreign_keys=ON;
+        """)
     con.commit()
     con.close()
 
@@ -336,7 +360,7 @@ def add_item():
         title = str(data["title"]).strip()
     except (KeyError, TypeError, ValueError):
         return jsonify(error="tmdb_id, media_type and title are required"), 400
-    if media_type not in ("movie", "tv") or not title:
+    if media_type not in ("movie", "tv", "game") or not title:
         return jsonify(error="invalid media_type or empty title"), 400
 
     db = get_db()
@@ -800,6 +824,8 @@ def set_config():
     cfg = read_config()
     if "tmdb_key" in data:
         cfg["tmdb_key"] = str(data["tmdb_key"]).strip()
+    if "rawg_key" in data:
+        cfg["rawg_key"] = str(data["rawg_key"]).strip()
     if "region" in data:
         region = str(data["region"]).strip().upper()
         if len(region) != 2 or not region.isalpha():

@@ -317,3 +317,78 @@ def test_suggestions_validation(client):
     ana = make_user(client, "Ana")
     assert client.get("/api/suggestions").status_code == 400
     assert client.put(f"/api/suggestions?user={ana}", json={"items": "nope"}).status_code == 400
+
+
+# ---------------------------------------------------------------- games
+
+def test_game_add_and_finish(client):
+    uid = make_user(client, "Ana")
+    g = add_item(client, tmdb_id=42, media_type="game", title="Hades")
+    r = client.patch(f"/api/library/{g}?user={uid}", json={"watched": True})
+    assert r.status_code == 200 and r.get_json()["watched"] is True
+    d = get_item(client, uid, g)
+    assert d["media_type"] == "game" and d["watched"] is True
+
+
+def test_game_syncs_in_shared_folder(client):
+    ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
+    g = add_item(client, tmdb_id=42, media_type="game", title="Hades")
+    fid = make_folder(client, ana, "Games", shared=True)
+    put_in_folder(client, ana, fid, g)
+    client.patch(f"/api/library/{g}?user={ana}", json={"watched": True})
+    assert get_item(client, bob, g)["watched"] is True
+
+
+def test_invalid_media_type_rejected(client):
+    make_user(client, "Ana")
+    r = client.post("/api/library", json={"tmdb_id": 1, "media_type": "book", "title": "X"})
+    assert r.status_code == 400
+
+
+def test_config_rawg_key_roundtrip(client):
+    got = client.put("/api/config", json={"rawg_key": " abc123 "}).get_json()
+    assert got["rawg_key"] == "abc123"
+    assert client.get("/api/config").get_json()["rawg_key"] == "abc123"
+
+
+def test_v5_migration_allows_games_and_keeps_data():
+    """A db created before the 'game' media type (old CHECK constraint) is
+    rebuilt in place by init_db() without losing rows or child-table data."""
+    import os
+    import sqlite3
+
+    import app as watchpi
+
+    if os.path.exists(watchpi.DB_PATH):
+        os.remove(watchpi.DB_PATH)
+    con = sqlite3.connect(watchpi.DB_PATH)
+    con.executescript("""
+        CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_open_at TEXT);
+        CREATE TABLE items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tmdb_id INTEGER NOT NULL,
+            media_type TEXT NOT NULL CHECK (media_type IN ('movie', 'tv')),
+            title TEXT NOT NULL, poster_path TEXT, added_at TEXT NOT NULL,
+            UNIQUE (tmdb_id, media_type));
+        CREATE TABLE episodes (
+            item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT NOT NULL,
+            PRIMARY KEY (item_id, user_id, season, episode));
+        INSERT INTO users (name, created_at) VALUES ('Ana', 't');
+        INSERT INTO items (tmdb_id, media_type, title, added_at) VALUES (1, 'tv', 'Old Show', 't');
+        INSERT INTO episodes VALUES (1, 1, 2, 3, 't');
+    """)
+    con.commit()
+    con.close()
+
+    watchpi.init_db()
+
+    con = sqlite3.connect(watchpi.DB_PATH)
+    assert con.execute("SELECT title FROM items").fetchone()[0] == "Old Show"
+    assert con.execute("SELECT season, episode FROM episodes").fetchone() == (2, 3)
+    con.execute("INSERT INTO items (tmdb_id, media_type, title, added_at) VALUES (9, 'game', 'Hades', 't')")
+    con.commit()
+    assert con.execute("SELECT COUNT(*) FROM items WHERE media_type='game'").fetchone()[0] == 1
+    con.close()

@@ -252,12 +252,13 @@
 /* ============================================================ config */
 /* Config lives on the Pi (data/config.json) so every device shares the
    same TMDB key & region — enter it once, anywhere. */
-const S = { key: '', region: 'US' };
+const S = { key: '', region: 'US', rawgKey: '' };
 async function loadConfig() {
   try {
     const cfg = await api('/config');
     S.key = cfg.tmdb_key || '';
     S.region = cfg.region || 'US';
+    S.rawgKey = cfg.rawg_key || '';
   } catch { /* Pi unreachable — views show their own errors */ }
 }
 
@@ -275,6 +276,8 @@ function updateProfileChip() {
   document.getElementById('profile-chip').textContent = USER ? USER.name : '';
 }
 const IMG = 'https://image.tmdb.org/t/p/';
+/* TMDB posters are paths; RAWG (game) images are absolute URLs */
+function posterUrl(p, size) { return p.startsWith('http') ? p : IMG + size + p; }
 let tab = 'library';
 let library = [];            // items from the Pi
 let libIndex = {};           // `${media_type}:${tmdb_id}` -> item
@@ -282,7 +285,7 @@ let detailCache = {};        // tmdb detail responses (per session)
 let seasonCache = {};        // `${tmdbId}:${season}` -> episodes
 let FOLDERS = [];            // folders visible to the current user
 let currentFolder = null;    // null = All
-let currentType = 'all';     // 'all' | 'movie' | 'tv'
+let currentType = 'all';     // 'all' | 'movie' | 'tv' | 'game'
 let NEW_EPISODES = [];       // shows with episodes aired since last open
 
 /* ============================================================ helpers */
@@ -315,6 +318,18 @@ async function tmdb(path, params = {}) {
   const r = await fetch(url, opts);
   if (r.status === 401) throw new Error('bad-key');
   if (!r.ok) throw new Error('tmdb-' + r.status);
+  return r.json();
+}
+
+/* RAWG — game metadata, same browser-side pattern as TMDB */
+async function rawg(path, params = {}) {
+  if (!S.rawgKey) throw new Error('no-rawg-key');
+  const url = new URL('https://api.rawg.io/api' + path);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  url.searchParams.set('key', S.rawgKey);
+  const r = await fetch(url);
+  if (r.status === 401) throw new Error('bad-rawg-key');
+  if (!r.ok) throw new Error('rawg-' + r.status);
   return r.json();
 }
 
@@ -395,7 +410,7 @@ async function renderLibrary() {
 
   /* type filter chips */
   const typeChips = el('<div class="chips"></div>');
-  for (const [type, label] of [['all', 'All'], ['movie', 'Movies'], ['tv', 'Series']]) {
+  for (const [type, label] of [['all', 'All'], ['movie', 'Movies'], ['tv', 'Series'], ['game', 'Games']]) {
     const c = el(`<button class="chip ${currentType === type ? 'active' : ''}">${label}</button>`);
     c.onclick = () => { currentType = type; renderLibrary(); };
     typeChips.appendChild(c);
@@ -432,7 +447,7 @@ async function renderLibrary() {
   for (const item of visible) {
     const card = el(`<div class="card ${item.stopped ? 'paused' : ''}">
       ${item.poster_path
-        ? `<img loading="lazy" src="${IMG}w185${item.poster_path}" alt="">`
+        ? `<img loading="lazy" src="${posterUrl(item.poster_path, 'w185')}" alt="">`
         : `<div class="noposter">${esc(item.title)}</div>`}
       <div class="title">${esc(item.title)}</div>
       <div class="progressbar" style="display:none"><div></div></div>
@@ -442,6 +457,11 @@ async function renderLibrary() {
     if (item.media_type === 'movie') {
       if (item.watched) card.prepend(el('<span class="badge done">✓ seen</span>'));
       sub.textContent = 'Movie';
+    } else if (item.media_type === 'game') {
+      if (item.watched) card.prepend(el('<span class="badge done">✓ finished</span>'));
+      else if (item.stopped) card.prepend(el('<span class="badge paused">⏸ shelved</span>'));
+      else card.prepend(el('<span class="badge">Game</span>'));
+      sub.textContent = item.stopped ? 'Stopped playing' : 'Game';
     } else if (item.stopped) {
       card.prepend(el('<span class="badge paused">⏸ paused</span>'));
       sub.textContent = 'Stopped watching';
@@ -496,7 +516,7 @@ async function renderFeed() {
   for (const e of events) {
     let what;
     if (e.kind === 'movie')
-      what = `<b>${esc(e.user_name)}</b> watched ${esc(e.title)}`;
+      what = `<b>${esc(e.user_name)}</b> ${e.media_type === 'game' ? 'finished' : 'watched'} ${esc(e.title)}`;
     else if (e.kind === 'folder_add')
       what = `<b>${esc(e.user_name)}</b> added ${esc(e.title)} to 👥 ${esc(e.folder_name)} — progress now syncs`;
     else if (e.kind === 'folder_remove')
@@ -504,7 +524,7 @@ async function renderFeed() {
     else
       what = `<b>${esc(e.user_name)}</b> watched ${e.n} episode${e.n === 1 ? '' : 's'} of ${esc(e.title)} S${e.season}`;
     const row = el(`<div class="feed-item">
-      ${e.poster_path ? `<img loading="lazy" src="${IMG}w92${e.poster_path}" alt="">` : '<div class="noposter"></div>'}
+      ${e.poster_path ? `<img loading="lazy" src="${posterUrl(e.poster_path, 'w92')}" alt="">` : '<div class="noposter"></div>'}
       <div class="what">${what}</div>
       <div class="when">${esc(ago(e.at))}</div>
     </div>`);
@@ -626,8 +646,10 @@ const SUGGEST = { maxSeeds: 12, perSeed: 12, maxResults: 24 };
 let SUGGESTIONS = null;   // {built_at, seed_hash, items} — session copy of the Pi cache
 
 function suggestionSeeds() {
-  const inFolders = library.filter(i => (i.folders || []).length);
-  const seeds = (inFolders.length ? inFolders : library).slice();
+  /* TMDB-only engine — games can't seed it */
+  const pool = library.filter(i => i.media_type === 'movie' || i.media_type === 'tv');
+  const inFolders = pool.filter(i => (i.folders || []).length);
+  const seeds = (inFolders.length ? inFolders : pool).slice();
   seeds.sort((a, b) => (b.last_watched_at || b.added_at || '')
     .localeCompare(a.last_watched_at || a.added_at || ''));
   return seeds.slice(0, SUGGEST.maxSeeds);
@@ -715,7 +737,7 @@ async function renderSuggestions() {
   for (const r of fresh) {
     const card = el(`<div class="card">
       ${r.poster_path
-        ? `<img loading="lazy" src="${IMG}w185${r.poster_path}" alt="">`
+        ? `<img loading="lazy" src="${posterUrl(r.poster_path, 'w185')}" alt="">`
         : `<div class="noposter">${esc(r.title)}</div>`}
       <span class="badge">${r.media_type}</span>
       <div class="title">${esc(r.title)}</div>
@@ -732,7 +754,7 @@ function renderSearch() {
   const main = document.getElementById('main');
   main.innerHTML = `
     <div class="searchbar">
-      <input id="q" type="search" placeholder="Search movies & TV…" autocomplete="off">
+      <input id="q" type="search" placeholder="Search movies, TV & games…" autocomplete="off">
     </div>
     <div id="results"></div>`;
   const q = document.getElementById('q');
@@ -744,35 +766,55 @@ function renderSearch() {
     '<div class="empty">Add your TMDB API key in ⚙ settings first.</div>';
 }
 
+function searchCard(mediaType, id, title, poster, date) {
+  const inLib = libIndex[`${mediaType}:${id}`];
+  const card = el(`<div class="card">
+    ${poster
+      ? `<img loading="lazy" src="${posterUrl(poster, 'w185')}" alt="">`
+      : `<div class="noposter">${esc(title)}</div>`}
+    ${inLib ? '<span class="badge done">✓ added</span>' : `<span class="badge">${mediaType}</span>`}
+    <div class="title">${esc(title)}</div>
+    <div class="sub">${year(date)}</div>
+  </div>`);
+  card.onclick = () => openDetail(mediaType, id, title);
+  return card;
+}
+
 async function doSearch(query) {
   const box = document.getElementById('results');
   if (!query.trim()) { renderSuggestions(); return; }
   box.innerHTML = '<div class="spin">Searching…</div>';
-  let data;
-  try {
-    data = await tmdb('/search/multi', { query, include_adult: 'false' });
-  } catch (e) { return handleTmdbError(e, box); }
 
-  const results = (data.results || []).filter(r => r.media_type === 'movie' || r.media_type === 'tv');
-  if (!results.length) { box.innerHTML = '<div class="empty">No results.</div>'; return; }
+  /* movies & TV from TMDB, games from RAWG (skipped without a RAWG key) */
+  const [tmdbRes, rawgRes] = await Promise.allSettled([
+    tmdb('/search/multi', { query, include_adult: 'false' }),
+    S.rawgKey ? rawg('/games', { search: query, page_size: 12 }) : Promise.reject(new Error('no-rawg-key')),
+  ]);
+  if (tmdbRes.status === 'rejected' && rawgRes.status === 'rejected')
+    return handleTmdbError(tmdbRes.reason, box);
 
-  const grid = el('<div class="grid"></div>');
-  for (const r of results) {
-    const title = r.title || r.name;
-    const inLib = libIndex[`${r.media_type}:${r.id}`];
-    const card = el(`<div class="card">
-      ${r.poster_path
-        ? `<img loading="lazy" src="${IMG}w185${r.poster_path}" alt="">`
-        : `<div class="noposter">${esc(title)}</div>`}
-      ${inLib ? '<span class="badge done">✓ added</span>' : `<span class="badge">${r.media_type}</span>`}
-      <div class="title">${esc(title)}</div>
-      <div class="sub">${year(r.release_date || r.first_air_date)}</div>
-    </div>`);
-    card.onclick = () => openDetail(r.media_type, r.id, title);
-    grid.appendChild(card);
-  }
+  const shows = tmdbRes.status === 'fulfilled'
+    ? (tmdbRes.value.results || []).filter(r => r.media_type === 'movie' || r.media_type === 'tv')
+    : [];
+  const games = rawgRes.status === 'fulfilled' ? (rawgRes.value.results || []) : [];
+  if (!shows.length && !games.length) { box.innerHTML = '<div class="empty">No results.</div>'; return; }
+
   box.innerHTML = '';
-  box.appendChild(grid);
+  if (shows.length) {
+    if (games.length) box.appendChild(el('<h3 class="section" style="margin-top:0">Movies &amp; TV</h3>'));
+    const grid = el('<div class="grid"></div>');
+    for (const r of shows)
+      grid.appendChild(searchCard(r.media_type, r.id, r.title || r.name, r.poster_path,
+        r.release_date || r.first_air_date));
+    box.appendChild(grid);
+  }
+  if (games.length) {
+    box.appendChild(el(`<h3 class="section" ${shows.length ? '' : 'style="margin-top:0"'}>Games</h3>`));
+    const grid = el('<div class="grid"></div>');
+    for (const g of games)
+      grid.appendChild(searchCard('game', g.id, g.name, g.background_image, g.released));
+    box.appendChild(grid);
+  }
 }
 
 function handleTmdbError(e, box) {
@@ -805,7 +847,9 @@ async function openDetail(mediaType, tmdbId, fallbackTitle) {
   let d;
   const ck = `${mediaType}:${tmdbId}`;
   try {
-    d = detailCache[ck] || await tmdb(`/${mediaType}/${tmdbId}`, { append_to_response: 'watch/providers' });
+    d = detailCache[ck] || (mediaType === 'game'
+      ? await rawg(`/games/${tmdbId}`)
+      : await tmdb(`/${mediaType}/${tmdbId}`, { append_to_response: 'watch/providers' }));
     detailCache[ck] = d;
   } catch (e) {
     sheet.innerHTML = '<div class="grabber"></div>';
@@ -820,12 +864,15 @@ async function openDetail(mediaType, tmdbId, fallbackTitle) {
 function renderDetail(sheet, mediaType, d, fallbackTitle) {
   const title = d.title || d.name || fallbackTitle;
   const item = libIndex[`${mediaType}:${d.id}`];
-  const date = d.release_date || d.first_air_date;
-  const meta = [
-    year(date),
-    mediaType === 'tv' ? `${d.number_of_seasons} season${d.number_of_seasons === 1 ? '' : 's'}` : (d.runtime ? d.runtime + ' min' : ''),
-    (d.vote_average ? '★ ' + d.vote_average.toFixed(1) : ''),
-  ].filter(Boolean).join(' · ');
+  const date = d.release_date || d.first_air_date || d.released;
+  const poster = d.poster_path || d.background_image;
+  const meta = (mediaType === 'game'
+    ? [year(date), d.playtime ? `~${d.playtime}h` : '', d.metacritic ? 'Metacritic ' + d.metacritic : '']
+    : [
+        year(date),
+        mediaType === 'tv' ? `${d.number_of_seasons} season${d.number_of_seasons === 1 ? '' : 's'}` : (d.runtime ? d.runtime + ' min' : ''),
+        (d.vote_average ? '★ ' + d.vote_average.toFixed(1) : ''),
+      ]).filter(Boolean).join(' · ');
 
   sheet.innerHTML = '<div class="grabber"></div>';
   sheet.appendChild(closeBtn());
@@ -838,7 +885,7 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
       : `<div class="meta" style="color:var(--green);font-weight:600">✓ Caught up</div>`;
   }
   sheet.appendChild(el(`<div class="detail-head">
-    ${d.poster_path ? `<img src="${IMG}w342${d.poster_path}" alt="">` : '<div class="noposter"></div>'}
+    ${poster ? `<img src="${posterUrl(poster, 'w342')}" alt="">` : '<div class="noposter"></div>'}
     <div>
       <h2>${esc(title)}</h2>
       <div class="meta">${esc(meta)}</div>
@@ -855,7 +902,7 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
       add.disabled = true;
       try {
         await api('/library', { method: 'POST', body: {
-          tmdb_id: d.id, media_type: mediaType, title, poster_path: d.poster_path } });
+          tmdb_id: d.id, media_type: mediaType, title, poster_path: poster } });
         await loadLibrary();
         toast('Added to library');
         renderDetail(sheet, mediaType, d, fallbackTitle);
@@ -864,8 +911,9 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
     };
     actions.appendChild(add);
   } else {
-    if (mediaType === 'movie') {
-      const w = el(`<button class="btn ${item.watched ? 'green' : ''}">${item.watched ? '✓ Watched' : 'Mark watched'}</button>`);
+    if (mediaType === 'movie' || mediaType === 'game') {
+      const doneLbl = mediaType === 'game' ? ['✓ Finished', 'Mark finished'] : ['✓ Watched', 'Mark watched'];
+      const w = el(`<button class="btn ${item.watched ? 'green' : ''}">${item.watched ? doneLbl[0] : doneLbl[1]}</button>`);
       w.onclick = async () => {
         await api(`/library/${item.id}?${userQ()}`, { method: 'PATCH', body: { watched: !item.watched } });
         await loadLibrary();
@@ -873,6 +921,21 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
         if (tab === 'library') renderLibrary();
       };
       actions.appendChild(w);
+    }
+    if (mediaType === 'game') {
+      const stopBtn = el(`<button class="btn">${item.stopped ? '▶ Keep playing' : '⏸ Stop playing'}</button>`);
+      stopBtn.onclick = async () => {
+        stopBtn.disabled = true;
+        try {
+          await api(`/library/${item.id}?${userQ()}`, { method: 'PATCH',
+            body: { stopped: !item.stopped } });
+          await loadLibrary();
+          toast(item.stopped ? 'Back on the backlog' : 'Shelved');
+          renderDetail(sheet, mediaType, d, fallbackTitle);
+          if (tab === 'library') renderLibrary();
+        } catch { stopBtn.disabled = false; toast('Failed — is the Pi up?'); }
+      };
+      actions.appendChild(stopBtn);
     }
     if (mediaType === 'tv') {
       const stopBtn = el(`<button class="btn">${item.stopped ? '▶ Continue watching' : '⏸ Stop watching'}</button>`);
@@ -972,6 +1035,22 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
       if (e.key === 'Enter') newForm.querySelector('#nf2-create').click();
     });
     sheet.appendChild(newForm);
+  }
+
+  /* games: platforms instead of streaming providers */
+  if (mediaType === 'game') {
+    if ((d.platforms || []).length) {
+      sheet.appendChild(el('<h3 class="section">Where to play</h3>'));
+      const row = el('<div class="chips" style="flex-wrap:wrap;overflow:visible"></div>');
+      for (const p of d.platforms)
+        row.appendChild(el(`<span class="chip" style="cursor:default">${esc(p.platform.name)}</span>`));
+      sheet.appendChild(row);
+    }
+    if (d.description_raw) {
+      sheet.appendChild(el('<h3 class="section">About</h3>'));
+      sheet.appendChild(el(`<p class="overview">${esc(d.description_raw.slice(0, 600))}${d.description_raw.length > 600 ? '…' : ''}</p>`));
+    }
+    return;
   }
 
   /* streaming availability */
@@ -1202,6 +1281,13 @@ function openSettings() {
              style="text-transform:uppercase" placeholder="US">
       <div class="hint">Two-letter country code, e.g. US, AR, ES, DE.</div>
     </div>
+    <div class="field">
+      <label>RAWG API key (optional — for video games)</label>
+      <input id="set-rawg" type="text" value="${esc(S.rawgKey)}" placeholder="leave empty to skip games"
+             autocomplete="off" spellcheck="false">
+      <div class="hint">Free at <a href="https://rawg.io/apidocs" target="_blank" rel="noopener">rawg.io/apidocs</a>.
+      Adds a Games section to search and a Games filter in the library.</div>
+    </div>
     <div class="btnrow">
       <button class="btn primary" id="set-save">Save</button>
       <button class="btn" onclick="closeSheet()">Cancel</button>
@@ -1214,15 +1300,16 @@ function openSettings() {
       const cfg = await api('/config', { method: 'PUT', body: {
         tmdb_key: document.getElementById('set-key').value.trim(),
         region: (document.getElementById('set-region').value || 'US').toUpperCase(),
+        rawg_key: document.getElementById('set-rawg').value.trim(),
       }});
-      S.key = cfg.tmdb_key; S.region = cfg.region;
+      S.key = cfg.tmdb_key; S.region = cfg.region; S.rawgKey = cfg.rawg_key || '';
       detailCache = {}; // region affects providers
       closeSheet();
       toast('Saved to the Pi');
       if (!USER) setTimeout(() => openProfilePicker(false), 300);
     } catch { btn.disabled = false; toast('Failed to save — is the Pi up?'); }
   };
-  for (const id of ['set-key', 'set-region'])
+  for (const id of ['set-key', 'set-region', 'set-rawg'])
     document.getElementById(id).addEventListener('keydown', e => {
       if (e.key === 'Enter') document.getElementById('set-save').click();
     });
