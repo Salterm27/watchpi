@@ -642,23 +642,29 @@ function openFolderManager() {
    folders — no self-hosted recommender needed. Tune it via SUGGEST below.
    Results are cached on the Pi per profile so every device shares them, and
    rebuilt on Fridays — only when the seed titles changed since last build. */
-const SUGGEST = { maxSeeds: 12, perSeed: 12, maxResults: 24 };
+const SUGGEST = { maxSeeds: 12, perSeed: 12, maxResults: 24, gameSeeds: 6, gameResults: 12 };
 let SUGGESTIONS = null;   // {built_at, seed_hash, items} — session copy of the Pi cache
 
 function suggestionSeeds() {
-  /* TMDB-only engine — games can't seed it */
-  const pool = library.filter(i => i.media_type === 'movie' || i.media_type === 'tv');
-  const inFolders = pool.filter(i => (i.folders || []).length);
-  const seeds = (inFolders.length ? inFolders : pool).slice();
-  seeds.sort((a, b) => (b.last_watched_at || b.added_at || '')
-    .localeCompare(a.last_watched_at || a.added_at || ''));
-  return seeds.slice(0, SUGGEST.maxSeeds);
+  const pick = (types, cap) => {
+    const pool = library.filter(i => types.includes(i.media_type));
+    const inFolders = pool.filter(i => (i.folders || []).length);
+    const seeds = (inFolders.length ? inFolders : pool).slice();
+    seeds.sort((a, b) => (b.last_watched_at || b.added_at || '')
+      .localeCompare(a.last_watched_at || a.added_at || ''));
+    return seeds.slice(0, cap);
+  };
+  return {
+    shows: pick(['movie', 'tv'], SUGGEST.maxSeeds),            // TMDB engine
+    games: S.rawgKey ? pick(['game'], SUGGEST.gameSeeds) : [], // RAWG engine
+  };
 }
 function seedHashOf(seeds) {
-  const s = seeds.map(x => `${x.media_type}:${x.tmdb_id}`).sort().join(',');
+  const all = [...seeds.shows, ...seeds.games];
+  const s = all.map(x => `${x.media_type}:${x.tmdb_id}`).sort().join(',');
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-  return h.toString(16) + ':' + seeds.length;
+  return h.toString(16) + ':' + all.length;
 }
 function lastFriday() {
   const d = new Date(); d.setHours(0, 0, 0, 0);
@@ -667,26 +673,57 @@ function lastFriday() {
 }
 
 async function buildSuggestions(seeds, hash) {
-  const cand = {};   // "type:id" -> {r, mt, n: seeds that recommend it, rank}
-  await Promise.all(seeds.map(async s => {
+  const cand = {};   // "type:id" -> {r, mt, n: seed hits, rank}
+  const consider = (r, mt, hits, rankPts) => {
+    const key = `${mt}:${r.id}`;
+    if (libIndex[key]) return;   // already in the library
+    const e = cand[key] || (cand[key] = { r, mt, n: 0, rank: 0 });
+    e.n += hits; e.rank += rankPts;
+  };
+
+  /* movies & tv: TMDB per-title recommendations */
+  await Promise.all(seeds.shows.map(async s => {
     try {
       const d = await tmdb(`/${s.media_type}/${s.tmdb_id}/recommendations`);
       (d.results || []).slice(0, SUGGEST.perSeed).forEach((r, idx) => {
         const mt = r.media_type || s.media_type;
-        if (mt !== 'movie' && mt !== 'tv') return;
-        const key = `${mt}:${r.id}`;
-        if (libIndex[key]) return;   // already in the library
-        const e = cand[key] || (cand[key] = { r, mt, n: 0, rank: 0 });
-        e.n += 1; e.rank += SUGGEST.perSeed - idx;
+        if (mt === 'movie' || mt === 'tv') consider(r, mt, 1, SUGGEST.perSeed - idx);
       });
     } catch { /* one failed seed shouldn't kill the build */ }
   }));
-  const items = Object.values(cand)
+
+  /* games: RAWG free tier — same-series entries (strong signal, extra hit
+     weight) plus one discovery query over the seed games' top genres */
+  const genreCount = {};
+  await Promise.all(seeds.games.map(async s => {
+    const [detail, series] = await Promise.allSettled([
+      rawg(`/games/${s.tmdb_id}`),
+      rawg(`/games/${s.tmdb_id}/game-series`, { page_size: 6 }),
+    ]);
+    if (detail.status === 'fulfilled')
+      for (const g of detail.value.genres || [])
+        genreCount[g.slug] = (genreCount[g.slug] || 0) + 1;
+    if (series.status === 'fulfilled')
+      (series.value.results || []).forEach((r, idx) => consider(r, 'game', 2, 6 - idx));
+  }));
+  const topGenres = Object.entries(genreCount).sort((a, b) => b[1] - a[1])
+    .slice(0, 3).map(([slug]) => slug);
+  if (topGenres.length) {
+    try {
+      const d = await rawg('/games', { genres: topGenres.join(','), ordering: '-metacritic', page_size: 24 });
+      (d.results || []).forEach((r, idx) => consider(r, 'game', 1, 24 - idx));
+    } catch { /* keep whatever candidates we have */ }
+  }
+
+  const ranked = Object.values(cand)
     .sort((a, b) => (b.n - a.n) || (b.rank - a.rank)
-      || ((b.r.vote_average || 0) - (a.r.vote_average || 0)))
-    .slice(0, SUGGEST.maxResults)
-    .map(e => ({ tmdb_id: e.r.id, media_type: e.mt, title: e.r.title || e.r.name,
-                 poster_path: e.r.poster_path, date: e.r.release_date || e.r.first_air_date || '' }));
+      || ((b.r.vote_average || b.r.rating || 0) - (a.r.vote_average || a.r.rating || 0)));
+  const items = [
+    ...ranked.filter(e => e.mt !== 'game').slice(0, SUGGEST.maxResults),
+    ...ranked.filter(e => e.mt === 'game').slice(0, SUGGEST.gameResults),
+  ].map(e => ({ tmdb_id: e.r.id, media_type: e.mt, title: e.r.title || e.r.name,
+                poster_path: e.r.poster_path || e.r.background_image || null,
+                date: e.r.release_date || e.r.first_air_date || e.r.released || '' }));
   await api(`/suggestions?${userQ()}`, { method: 'PUT', body: { seed_hash: hash, items } });
   return { built_at: new Date().toISOString(), seed_hash: hash, items };
 }
@@ -696,7 +733,7 @@ async function refreshSuggestions(force = false) {
   if (!USER || !S.key) return null;
   try { if (!library.length) await loadLibrary(); } catch { return null; }
   const seeds = suggestionSeeds();
-  if (!seeds.length) return null;
+  if (!seeds.shows.length && !seeds.games.length) return null;
   const hash = seedHashOf(seeds);
   let cache = SUGGESTIONS;
   if (!cache) { try { cache = await api(`/suggestions?${userQ()}`); } catch { return null; } }
@@ -716,10 +753,11 @@ async function renderSuggestions() {
   const sug = await refreshSuggestions();
   const q = document.getElementById('q');
   if (!q || q.value.trim()) return;   // user started a search meanwhile
-  const fresh = (sug ? sug.items : []).filter(r => !libIndex[`${r.media_type}:${r.tmdb_id}`]);
+  let fresh = (sug ? sug.items : []).filter(r => !libIndex[`${r.media_type}:${r.tmdb_id}`]);
+  if (searchType !== 'all') fresh = fresh.filter(r => r.media_type === searchType);
   if (!fresh.length) {
-    box.innerHTML = `<div class="empty">Type to search TMDB.<br>
-      <span style="font-size:12px">Suggestions appear here once your folders have a few titles.</span></div>`;
+    box.innerHTML = `<div class="empty">Type to search.<br>
+      <span style="font-size:12px">Suggestions appear here once your folders have a few titles${searchType === 'game' ? ' (games need a RAWG key in ⚙ settings)' : ''}.</span></div>`;
     return;
   }
   box.innerHTML = '';
@@ -733,35 +771,61 @@ async function renderSuggestions() {
   };
   box.appendChild(head);
   box.appendChild(el('<p class="hint" style="margin-bottom:12px">Based on the titles across your folders · refreshes on Fridays when your library changed.</p>'));
-  const grid = el('<div class="grid"></div>');
-  for (const r of fresh) {
-    const card = el(`<div class="card">
-      ${r.poster_path
-        ? `<img loading="lazy" src="${posterUrl(r.poster_path, 'w185')}" alt="">`
-        : `<div class="noposter">${esc(r.title)}</div>`}
-      <span class="badge">${r.media_type}</span>
-      <div class="title">${esc(r.title)}</div>
-      <div class="sub">${year(r.date)}</div>
-    </div>`);
-    card.onclick = () => openDetail(r.media_type, r.tmdb_id, r.title);
-    grid.appendChild(card);
+  const addGrid = list => {
+    const grid = el('<div class="grid"></div>');
+    for (const r of list) {
+      const card = el(`<div class="card">
+        ${r.poster_path
+          ? `<img loading="lazy" src="${posterUrl(r.poster_path, 'w185')}" alt="">`
+          : `<div class="noposter">${esc(r.title)}</div>`}
+        <span class="badge">${r.media_type}</span>
+        <div class="title">${esc(r.title)}</div>
+        <div class="sub">${year(r.date)}</div>
+      </div>`);
+      card.onclick = () => openDetail(r.media_type, r.tmdb_id, r.title);
+      grid.appendChild(card);
+    }
+    box.appendChild(grid);
+  };
+  const shows = fresh.filter(r => r.media_type !== 'game');
+  const games = fresh.filter(r => r.media_type === 'game');
+  if (shows.length && games.length) {
+    box.appendChild(el('<h3 class="section">Movies &amp; TV</h3>'));
+    addGrid(shows);
+    box.appendChild(el('<h3 class="section">Games</h3>'));
+    addGrid(games);
+  } else {
+    addGrid(fresh);
   }
-  box.appendChild(grid);
 }
 
 /* ============================================================ search view */
+let searchType = 'all';   // 'all' | 'movie' | 'tv' | 'game' — Search tab filter
+
 function renderSearch() {
   const main = document.getElementById('main');
   main.innerHTML = `
     <div class="searchbar">
       <input id="q" type="search" placeholder="Search movies, TV & games…" autocomplete="off">
     </div>
+    <div class="chips" id="search-type-chips"></div>
     <div id="results"></div>`;
+  const chipsRow = document.getElementById('search-type-chips');
+  for (const [type, label] of [['all', 'All'], ['movie', 'Movies'], ['tv', 'Series'], ['game', 'Games']]) {
+    const c = el(`<button class="chip ${searchType === type ? 'active' : ''}">${label}</button>`);
+    c.onclick = () => {
+      searchType = type;
+      [...chipsRow.children].forEach(b => b.classList.toggle('active', b === c));
+      const qv = document.getElementById('q').value;
+      if (qv.trim()) doSearch(qv); else renderSuggestions();
+    };
+    chipsRow.appendChild(c);
+  }
   const q = document.getElementById('q');
   let timer;
   q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => doSearch(q.value), 350); });
   q.focus();
-  if (S.key) renderSuggestions();
+  if (S.key || S.rawgKey) renderSuggestions();
   else document.getElementById('results').innerHTML =
     '<div class="empty">Add your TMDB API key in ⚙ settings first.</div>';
 }
@@ -785,17 +849,24 @@ async function doSearch(query) {
   if (!query.trim()) { renderSuggestions(); return; }
   box.innerHTML = '<div class="spin">Searching…</div>';
 
-  /* movies & TV from TMDB, games from RAWG (skipped without a RAWG key) */
+  /* movies & TV from TMDB, games from RAWG — honoring the type filter */
+  const wantShows = searchType !== 'game';
+  const wantGames = (searchType === 'all' || searchType === 'game') && S.rawgKey;
   const [tmdbRes, rawgRes] = await Promise.allSettled([
-    tmdb('/search/multi', { query, include_adult: 'false' }),
-    S.rawgKey ? rawg('/games', { search: query, page_size: 12 }) : Promise.reject(new Error('no-rawg-key')),
+    wantShows ? tmdb('/search/multi', { query, include_adult: 'false' }) : Promise.reject(new Error('skipped')),
+    wantGames ? rawg('/games', { search: query, page_size: 12 }) : Promise.reject(new Error('skipped')),
   ]);
-  if (tmdbRes.status === 'rejected' && rawgRes.status === 'rejected')
+  if (tmdbRes.status === 'rejected' && rawgRes.status === 'rejected') {
+    if (searchType === 'game')
+      { box.innerHTML = '<div class="empty">Add a RAWG API key in ⚙ settings to search games.</div>'; return; }
     return handleTmdbError(tmdbRes.reason, box);
+  }
 
-  const shows = tmdbRes.status === 'fulfilled'
+  let shows = tmdbRes.status === 'fulfilled'
     ? (tmdbRes.value.results || []).filter(r => r.media_type === 'movie' || r.media_type === 'tv')
     : [];
+  if (searchType === 'movie' || searchType === 'tv')
+    shows = shows.filter(r => r.media_type === searchType);
   const games = rawgRes.status === 'fulfilled' ? (rawgRes.value.results || []) : [];
   if (!shows.length && !games.length) { box.innerHTML = '<div class="empty">No results.</div>'; return; }
 

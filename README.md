@@ -128,13 +128,16 @@ small folder-activity log.
 
 ## Suggestions
 
-The Search tab shows "✨ Suggested for you" while the box is empty. The
-engine is TMDB's own per-title recommendations (the data behind every
-"More like this" row), seeded with the titles across your folders: each
-seed's recommendations are aggregated, titles recommended by several of
-your seeds rank first, and anything already in the library is dropped.
-Results are cached on the Pi per profile (`/api/suggestions`) so every
-device shares one batch; it rebuilds on Fridays and only if your
+The Search tab shows "✨ Suggested for you" while the box is empty, and an
+All / Movies / Series / Games chip row filters both suggestions and search
+results. Movies & TV come from TMDB's own per-title recommendations (the
+data behind every "More like this" row), seeded with the titles across your
+folders: each seed's recommendations are aggregated, titles recommended by
+several of your seeds rank first, and anything already in the library is
+dropped. Games use RAWG's free tier: other entries in your games' series
+rank highest, topped up by a discovery query over your games' most common
+genres. Results are cached on the Pi per profile (`/api/suggestions`) so
+every device shares one batch; it rebuilds on Fridays and only if your
 folders/library changed since the last build (a Refresh button forces it).
 Tune the knobs in the `SUGGEST` constant in `static/index.html`.
 
@@ -148,8 +151,7 @@ simply don't appear in search). Games are tracked like movies: a
 **✓ finished** flag plus a personal **⏸ shelved** state that greys the cover;
 they join folders, shared-progress sync, the Games filter chip, and the feed
 ("Ana finished Hades"). The detail sheet shows platforms, Metacritic and
-average playtime instead of streaming providers. Suggestions stay movie/TV
-only (RAWG's similar-games endpoint is paid-tier).
+average playtime instead of streaming providers.
 
 ## New-episode alerts
 
