@@ -97,6 +97,20 @@
   .empty { text-align: center; color: var(--muted); padding: 48px 16px; }
   .empty .big { font-size: 40px; margin-bottom: 10px; }
 
+  /* tonight picker */
+  .tonight-card { max-width: 340px; margin: 8px auto 0; text-align: center; }
+  .tonight-card img, .tonight-card .noposter {
+    width: 62%; aspect-ratio: 2/3; object-fit: cover; border-radius: var(--radius);
+    background: var(--panel2); margin: 0 auto 14px; display: block;
+  }
+  .tonight-card .noposter { display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 13px; padding: 8px; }
+  .tonight-card h2 { font-size: 20px; margin-bottom: 6px; }
+  .tonight-card .meta { color: var(--muted); font-size: 14px; margin-bottom: 12px; }
+  .tonight-btns { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+  .tonight-btns .btn { padding: 14px; font-size: 16px; }
+  .bigpick { display: block; width: 100%; padding: 16px; font-size: 17px; margin-top: 18px; }
+
   /* folder chips */
   .chips { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 10px;
     margin-bottom: 12px; scrollbar-width: none; }
@@ -238,6 +252,7 @@
 
 <nav>
   <button id="tab-library" class="active" onclick="showTab('library')"><span class="ico">🗂</span>Library</button>
+  <button id="tab-tonight" onclick="showTab('tonight')"><span class="ico">🌙</span>Tonight</button>
   <button id="tab-feed" onclick="showTab('feed')"><span class="ico">👀</span>Feed</button>
   <button id="tab-search" onclick="showTab('search')"><span class="ico">🔍</span>Search</button>
 </nav>
@@ -368,9 +383,10 @@ async function loadFolders() {
 /* ============================================================ tabs */
 function showTab(t) {
   tab = t;
-  for (const n of ['library', 'feed', 'search'])
+  for (const n of ['library', 'tonight', 'feed', 'search'])
     document.getElementById('tab-' + n).classList.toggle('active', t === n);
   if (t === 'library') renderLibrary();
+  else if (t === 'tonight') renderTonight();
   else if (t === 'feed') renderFeed();
   else renderSearch();
 }
@@ -496,6 +512,150 @@ async function enrichCard(item, card) {
         Math.min(100, Math.round(100 * item.watched_episodes / total)) + '%';
     }
   } catch { /* no key / offline — card keeps its basic label */ }
+}
+
+/* ============================================================ tonight picker
+   One-card decision engine over the library: pick two constraints (time,
+   company), get ONE candidate, accept or reroll. Rerolls are capped —
+   rerolling forever is just scrolling with extra steps. */
+const TONIGHT = { maxRerolls: 3 };
+let tonightPrefs = { time: 'any', folder: null };
+try { tonightPrefs = { ...tonightPrefs, ...JSON.parse(localStorage.getItem('watchpi_tonight') || '{}') }; } catch {}
+let tonightPicks = [];   // ranked candidates for the current roll session
+let tonightIdx = 0;
+
+function saveTonightPrefs() { localStorage.setItem('watchpi_tonight', JSON.stringify(tonightPrefs)); }
+
+async function renderTonight() {
+  const main = document.getElementById('main');
+  main.innerHTML = '<div class="spin">Loading…</div>';
+  try { await Promise.all([loadLibrary(), loadFolders()]); }
+  catch { main.innerHTML = '<div class="empty">Can’t reach the Pi API.</div>'; return; }
+  if (tonightPrefs.folder && !FOLDERS.find(f => f.id === tonightPrefs.folder)) tonightPrefs.folder = null;
+
+  main.innerHTML = '';
+  main.appendChild(el('<h3 class="section" style="margin-top:0">How long do you have?</h3>'));
+  const trow = el('<div class="chips"></div>');
+  for (const [v, label] of [['30', '~30 min'], ['60', '~1 hour'], ['movie', 'Movie night'], ['any', 'Whatever']]) {
+    const c = el(`<button class="chip ${tonightPrefs.time === v ? 'active' : ''}">${label}</button>`);
+    c.onclick = () => { tonightPrefs.time = v; saveTonightPrefs(); renderTonight(); };
+    trow.appendChild(c);
+  }
+  main.appendChild(trow);
+
+  main.appendChild(el("<h3 class='section'>Who's watching?</h3>"));
+  const frow = el('<div class="chips"></div>');
+  const me = el(`<button class="chip ${tonightPrefs.folder === null ? 'active' : ''}">Just me</button>`);
+  me.onclick = () => { tonightPrefs.folder = null; saveTonightPrefs(); renderTonight(); };
+  frow.appendChild(me);
+  for (const f of FOLDERS.filter(f => f.shared)) {
+    const c = el(`<button class="chip ${tonightPrefs.folder === f.id ? 'active' : ''}">👥 ${esc(f.name)}</button>`);
+    c.onclick = () => { tonightPrefs.folder = f.id; saveTonightPrefs(); renderTonight(); };
+    frow.appendChild(c);
+  }
+  main.appendChild(frow);
+
+  const pick = el('<button class="btn primary bigpick">🎲 Pick for me</button>');
+  pick.onclick = async () => {
+    pick.disabled = true; pick.textContent = 'Thinking…';
+    tonightPicks = await computeTonightPicks(tonightPrefs.time, tonightPrefs.folder);
+    tonightIdx = 0;
+    renderTonightCard();
+  };
+  main.appendChild(pick);
+  main.appendChild(el("<p class='hint' style='margin-top:10px'>One pick at a time, from your own library — no scrolling. You get 3 rerolls, then it's decided 🍿</p>"));
+}
+
+async function computeTonightPicks(time, folderId) {
+  const pool = library.filter(i =>
+    i.media_type !== 'game' && !i.stopped &&
+    !(i.media_type === 'movie' && i.watched) &&
+    (folderId === null || (i.folders || []).includes(folderId)));
+
+  const picks = [];
+  await Promise.all(pool.map(async item => {
+    try {
+      const ck = `${item.media_type}:${item.tmdb_id}`;
+      const d = detailCache[ck] || await tmdb(`/${item.media_type}/${item.tmdb_id}`, { append_to_response: 'watch/providers' });
+      detailCache[ck] = d;
+      let runtime, info;
+      if (item.media_type === 'tv') {
+        const next = computeNextUp(d, watchedSetOf(item));
+        if (!next) return;   // caught up — nothing to watch tonight
+        runtime = (d.episode_run_time && d.episode_run_time[0])
+          || (d.last_episode_to_air && d.last_episode_to_air.runtime) || 40;
+        info = `Next up S${next.s}E${next.e} · ~${runtime} min`;
+      } else {
+        runtime = d.runtime || 105;
+        info = `Movie · ${Math.floor(runtime / 60)}h ${String(runtime % 60).padStart(2, '0')}m`;
+      }
+      if (time === '30' && (item.media_type !== 'tv' || runtime > 35)) return;
+      if (time === '60' && runtime > 70) return;
+      if (time === 'movie' && item.media_type !== 'movie') return;
+
+      /* score: mid-binge recency beats everything, fresh episodes next, movies last */
+      let score = 0;
+      if (item.media_type === 'tv' && item.watched_episodes > 0 && item.last_watched_at) {
+        const days = (Date.now() - new Date(item.last_watched_at).getTime()) / 86400e3;
+        score = 1000 - Math.min(days, 900);   // the fresher the binge, the higher
+      }
+      const le = d.last_episode_to_air;
+      if (item.media_type === 'tv' && le && le.air_date &&
+          (Date.now() - new Date(le.air_date).getTime()) / 86400e3 < 14) score += 80;
+      if (item.media_type === 'movie')
+        score = 50 + new Date(item.added_at).getTime() / 1e13;   // after active binges, newest first
+      picks.push({ item, d, info, score });
+    } catch { /* offline / failed lookup — skip this candidate */ }
+  }));
+  picks.sort((a, b) => b.score - a.score);
+  return picks;
+}
+
+function renderTonightCard() {
+  const main = document.getElementById('main');
+  main.innerHTML = '';
+  if (!tonightPicks.length) {
+    main.appendChild(el(`<div class="empty"><div class="big">🌙</div>
+      Nothing in your library fits.<br>Loosen the filters — or add something from Search.</div>`));
+    const back = el('<button class="btn" style="display:block;margin:0 auto">‹ Change filters</button>');
+    back.onclick = renderTonight;
+    main.appendChild(back);
+    return;
+  }
+  const { item, d, info } = tonightPicks[Math.min(tonightIdx, tonightPicks.length - 1)];
+  const card = el(`<div class="tonight-card">
+    ${item.poster_path
+      ? `<img src="${posterUrl(item.poster_path, 'w342')}" alt="">`
+      : `<div class="noposter">${esc(item.title)}</div>`}
+    <h2>${esc(item.title)}</h2>
+    <div class="meta">${esc(info)}</div>
+    <div class="providers" style="justify-content:center" id="t-prov"></div>
+    <div class="tonight-btns">
+      <button class="btn primary" id="t-go">▶ This one</button>
+      <button class="btn" id="t-re"></button>
+      <button class="btn" id="t-back" style="background:none;color:var(--muted)">‹ Change filters</button>
+    </div>
+  </div>`);
+  const provs = ((d['watch/providers'] || {}).results || {})[S.region];
+  if (provs && provs.flatrate) {
+    const box = card.querySelector('#t-prov');
+    for (const pr of provs.flatrate.slice(0, 4))
+      box.appendChild(el(`<div class="provider">
+        <img loading="lazy" src="${IMG}w92${pr.logo_path}" alt="">
+        <span>${esc(pr.provider_name)}</span></div>`));
+  }
+  card.querySelector('#t-go').onclick = () => openDetail(item.media_type, item.tmdb_id, item.title);
+  const re = card.querySelector('#t-re');
+  const rerollsLeft = TONIGHT.maxRerolls - tonightIdx;
+  if (rerollsLeft > 0 && tonightIdx < tonightPicks.length - 1) {
+    re.textContent = `🎲 Something else (${rerollsLeft})`;
+    re.onclick = () => { tonightIdx++; renderTonightCard(); };
+  } else {
+    re.textContent = "That's the one — enjoy 🍿";
+    re.disabled = true;
+  }
+  card.querySelector('#t-back').onclick = renderTonight;
+  main.appendChild(card);
 }
 
 /* ============================================================ feed view */

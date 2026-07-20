@@ -118,6 +118,21 @@ the folder tracks one shared position:
 Add/remove a title from folders inside its detail sheet ("＋ New folder"
 there creates one on the spot); edit members via Library → ＋ Folders.
 
+## Tonight
+
+The 🌙 Tonight tab is for the "I can't decide what to watch" moment. The
+problem is never a lack of options — it's choosing from an open grid while
+tired. So Tonight never shows a grid: pick how long you have (~30 min /
+~1 hour / movie night / whatever) and who's watching (just you, or a shared
+folder — synced progress means everyone in it is at the same episode), tap
+**🎲 Pick for me**, and you get exactly ONE card: title, next-up episode and
+runtime, where to stream. Accept it or reroll — but only 3 times, because
+endless rerolling is just scrolling with extra steps. Candidates come from
+your own already-vetted library: shows you're mid-binge on rank first
+(freshest first), then shows with a recently aired episode, then unwatched
+movies. Caught-up shows, stopped titles, watched movies and games are never
+offered. Your choices are remembered per device.
+
 ## Feed
 
 The Feed tab shows what other profiles have been watching, newest first,
