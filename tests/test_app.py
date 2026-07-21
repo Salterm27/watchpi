@@ -440,3 +440,40 @@ def test_remove_is_per_profile_shared_catalog_kept(client):
     assert client.delete(f"/api/library/{item}?user={ana}").status_code == 204
     assert not in_library(client, ana, item)
     assert in_library(client, bob, item)
+
+
+# ---------------------------------------------------------------- suggestion hides
+
+def hide(client, uid, media_type, tmdb_id, hidden=True):
+    return client.put(f"/api/suggestions/hide?user={uid}",
+                      json={"media_type": media_type, "tmdb_id": tmdb_id, "hidden": hidden})
+
+
+def test_hide_and_unhide_roundtrip(client):
+    uid = make_user(client, "Ana")
+    assert hide(client, uid, "tv", 123).status_code == 200
+    assert client.get(f"/api/suggestions?user={uid}").get_json()["hidden"] == ["tv:123"]
+    assert hide(client, uid, "tv", 123, hidden=False).status_code == 200
+    assert client.get(f"/api/suggestions?user={uid}").get_json()["hidden"] == []
+
+
+def test_hides_are_per_user(client):
+    ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
+    hide(client, ana, "game", 777)
+    assert client.get(f"/api/suggestions?user={ana}").get_json()["hidden"] == ["game:777"]
+    assert client.get(f"/api/suggestions?user={bob}").get_json()["hidden"] == []
+
+
+def test_clear_all_hides(client):
+    uid = make_user(client, "Ana")
+    hide(client, uid, "tv", 1)
+    hide(client, uid, "movie", 2)
+    assert client.delete(f"/api/suggestions/hide?user={uid}").status_code == 204
+    assert client.get(f"/api/suggestions?user={uid}").get_json()["hidden"] == []
+
+
+def test_hide_validation(client):
+    uid = make_user(client, "Ana")
+    assert hide(client, uid, "book", 1).status_code == 400
+    r = client.put(f"/api/suggestions/hide?user={uid}", json={"media_type": "tv", "tmdb_id": "x", "hidden": True})
+    assert r.status_code == 400

@@ -175,6 +175,9 @@ rank highest, topped up by a discovery query over your games' most common
 genres. Results are cached on the Pi per profile (`/api/suggestions`) so
 every device shares one batch; it rebuilds on Fridays and only if your
 folders/library changed since the last build (a Refresh button forces it).
+Not interested in something? The ✕ on a suggestion card hides that title
+from your suggestions for good (per profile, stored on the Pi — explicit
+searches still find it); reset the list anytime in ⚙ Settings.
 Tune the knobs in the `SUGGEST` constant in `static/index.html`.
 
 ## Games
@@ -241,8 +244,10 @@ watch timestamp for the requesting profile — used for the Series sort).
 | DELETE | /api/folders/:id (u)              | —                                                 |
 | PUT    | /api/folders/:id/items (u)        | `{item_id, member: bool}` (add copies your progress to members) |
 | GET    | /api/feed (u)                     | —                                                 |
-| GET    | /api/suggestions (u)              | — cached suggestion batch `{built_at, seed_hash, items}` |
+| GET    | /api/suggestions (u)              | — cached batch `{built_at, seed_hash, items, hidden}`   |
 | PUT    | /api/suggestions (u)              | `{seed_hash, items}` (browser-built, see Suggestions) |
+| PUT    | /api/suggestions/hide (u)         | `{media_type, tmdb_id, hidden: bool}` ("not interested") |
+| DELETE | /api/suggestions/hide (u)         | — reset the user's "not interested" list          |
 | PUT    | /api/users/:id/seen               | `{}` → returns previous open time                 |
 | GET    | /api/config                       | —                                                 |
 | PUT    | /api/config                       | `{tmdb_key?, region?, rawg_key?}`                 |

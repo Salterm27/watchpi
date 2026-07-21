@@ -89,6 +89,11 @@
   }
   .badge.done { color: var(--green); }
   .badge.paused { color: var(--muted); }
+  .card .dismiss {
+    position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,.75);
+    color: var(--muted); border: none; width: 26px; height: 26px; border-radius: 50%;
+    font-size: 12px; cursor: pointer; z-index: 2;
+  }
   .card.paused img, .card.paused .noposter { filter: grayscale(1); opacity: .5; }
   .card.paused .title { color: var(--muted); }
   .progressbar { height: 4px; background: #2a3040; border-radius: 2px; margin-top: 5px; overflow: hidden; }
@@ -923,6 +928,7 @@ function openFolderManager() {
    rebuilt on Fridays — only when the seed titles changed since last build. */
 const SUGGEST = { maxSeeds: 12, perSeed: 12, maxResults: 24, gameSeeds: 6, gameResults: 12 };
 let SUGGESTIONS = null;   // {built_at, seed_hash, items} — session copy of the Pi cache
+let HIDDEN = new Set();   // "type:id" the user marked "not interested" (per profile, stored on the Pi)
 
 function suggestionSeeds() {
   const pick = (types, cap) => {
@@ -955,7 +961,7 @@ async function buildSuggestions(seeds, hash) {
   const cand = {};   // "type:id" -> {r, mt, n: seed hits, rank}
   const consider = (r, mt, hits, rankPts) => {
     const key = `${mt}:${r.id}`;
-    if (libIndex[key]) return;   // already in the library
+    if (libIndex[key] || HIDDEN.has(key)) return;   // in the library, or "not interested"
     const e = cand[key] || (cand[key] = { r, mt, n: 0, rank: 0 });
     e.n += hits; e.rank += rankPts;
   };
@@ -1015,7 +1021,12 @@ async function refreshSuggestions(force = false) {
   if (!seeds.shows.length && !seeds.games.length) return null;
   const hash = seedHashOf(seeds);
   let cache = SUGGESTIONS;
-  if (!cache) { try { cache = await api(`/suggestions?${userQ()}`); } catch { return null; } }
+  if (!cache) {
+    try {
+      cache = await api(`/suggestions?${userQ()}`);
+      HIDDEN = new Set(cache.hidden || []);
+    } catch { return null; }
+  }
   const stale = !cache.items.length
     || (cache.seed_hash !== hash && new Date(cache.built_at) < lastFriday());
   if (force || stale) {
@@ -1032,7 +1043,8 @@ async function renderSuggestions() {
   const sug = await refreshSuggestions();
   const q = document.getElementById('q');
   if (!q || q.value.trim()) return;   // user started a search meanwhile
-  let fresh = (sug ? sug.items : []).filter(r => !libIndex[`${r.media_type}:${r.tmdb_id}`]);
+  let fresh = (sug ? sug.items : []).filter(r =>
+    !libIndex[`${r.media_type}:${r.tmdb_id}`] && !HIDDEN.has(`${r.media_type}:${r.tmdb_id}`));
   if (searchType !== 'all') fresh = fresh.filter(r => r.media_type === searchType);
   if (!fresh.length) {
     box.innerHTML = `<div class="empty">Type to search.<br>
@@ -1058,10 +1070,22 @@ async function renderSuggestions() {
           ? `<img loading="lazy" src="${posterUrl(r.poster_path, 'w185')}" alt="">`
           : `<div class="noposter">${esc(r.title)}</div>`}
         <span class="badge">${r.media_type}</span>
+        <button class="dismiss" title="Not interested">✕</button>
         <div class="title">${esc(r.title)}</div>
         <div class="sub">${year(r.date)}</div>
       </div>`);
       card.onclick = () => openDetail(r.media_type, r.tmdb_id, r.title);
+      card.querySelector('.dismiss').onclick = async ev => {
+        ev.stopPropagation();
+        const key = `${r.media_type}:${r.tmdb_id}`;
+        try {
+          await api(`/suggestions/hide?${userQ()}`, { method: 'PUT',
+            body: { media_type: r.media_type, tmdb_id: r.tmdb_id, hidden: true } });
+          HIDDEN.add(key);
+          card.remove();
+          toast(`Won't suggest “${r.title}” again`);
+        } catch { toast('Failed — is the Pi up?'); }
+      };
       grid.appendChild(card);
     }
     box.appendChild(grid);
@@ -1663,6 +1687,25 @@ function openSettings() {
     document.getElementById(id).addEventListener('keydown', e => {
       if (e.key === 'Enter') document.getElementById('set-save').click();
     });
+  /* "not interested" reset — shown only when the profile has hidden titles */
+  if (USER) api(`/suggestions?${userQ()}`).then(s => {
+    HIDDEN = new Set(s.hidden || []);
+    if (!HIDDEN.size) return;
+    const row = el(`<div class="field">
+      <label>Suggestions</label>
+      <div class="hint">${HIDDEN.size} title${HIDDEN.size === 1 ? '' : 's'} marked "not interested" — they may only reappear after the next suggestions refresh.</div>
+      <div class="btnrow" style="margin-top:8px"><button class="btn" id="set-unhide">Show them again</button></div>
+    </div>`);
+    sheet.insertBefore(row, sheet.querySelector('.btnrow'));
+    row.querySelector('#set-unhide').onclick = async () => {
+      try {
+        await api(`/suggestions/hide?${userQ()}`, { method: 'DELETE' });
+        HIDDEN = new Set();
+        row.remove();
+        toast('Hidden suggestions reset');
+      } catch { toast('Failed — is the Pi up?'); }
+    };
+  }).catch(() => {});
 }
 
 /* ============================================================ boot */
