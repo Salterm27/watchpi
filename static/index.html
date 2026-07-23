@@ -179,6 +179,13 @@
   h3.section { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
     color: var(--muted); margin: 18px 0 10px; }
 
+  /* library triage groups */
+  .grp-head { display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 18px 0 10px; }
+  .grp-head .chev { color: var(--muted); font-size: 13px; transition: transform .15s; }
+  .grp-head.open .chev { transform: rotate(90deg); }
+  .grp-head .name { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .grp-head .count { font-size: 12px; color: var(--muted); }
+
   /* providers */
   .providers { display: flex; gap: 10px; flex-wrap: wrap; }
   .provider { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 56px; }
@@ -302,6 +309,11 @@ let FOLDERS = [];            // folders visible to the current user
 let currentFolder = null;    // null = All
 let currentType = 'all';     // 'all' | 'movie' | 'tv' | 'game'
 let NEW_EPISODES = [];       // shows with episodes aired since last open
+/* library triage groups: collapse state + cached caught-up verdicts, per device */
+let libGroups = { done: false, stopped: false };   // false = collapsed
+try { libGroups = { ...libGroups, ...JSON.parse(localStorage.getItem('watchpi_lib_groups') || '{}') }; } catch {}
+let caughtUpCache = {};      // tmdbId -> {watched, caughtUp} — instant grouping on repeat opens
+try { caughtUpCache = JSON.parse(localStorage.getItem('watchpi_caughtup') || '{}'); } catch {}
 
 /* ============================================================ helpers */
 function el(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
@@ -373,6 +385,17 @@ function computeNextUp(d, watchedSet) {
       if (!watchedSet.has(`${s.season_number}:${e}`)) return { s: s.season_number, e };
   return null;
 }
+/* like computeNextUp but "caught up" once every AIRED episode is watched — the
+   next-up must not point past the last episode that has actually aired. */
+function nextUpAired(d, watchedSet) {
+  const n = computeNextUp(d, watchedSet);
+  if (!n) return null;
+  const le = d.last_episode_to_air;
+  if (!le || !le.season_number) return null;   // nothing aired yet
+  if (n.s > le.season_number || (n.s === le.season_number && n.e > le.episode_number))
+    return null;                               // caught up on everything aired
+  return n;
+}
 function watchedSetOf(item) {
   return new Set((item.episodes || []).map(([s, e]) => `${s}:${e}`));
 }
@@ -442,16 +465,6 @@ async function renderLibrary() {
   visible = [...visible].sort((a, b) =>
     (b.last_watched_at || b.added_at || '').localeCompare(a.last_watched_at || a.added_at || ''));
 
-  /* series sort: actively-watching shows first, then by most recent watch activity */
-  if (currentType === 'tv') {
-    const isActive = i => i.watched_episodes > 0 && !i.stopped;
-    visible = [...visible].sort((a, b) => {
-      const av = isActive(a), bv = isActive(b);
-      if (av !== bv) return av ? -1 : 1;
-      return (b.last_watched_at || '').localeCompare(a.last_watched_at || '');
-    });
-  }
-
   if (!visible.length) {
     main.appendChild(el(`<div class="empty"><div class="big">🎬</div>
       ${currentFolder === null && currentType === 'all'
@@ -459,37 +472,143 @@ async function renderLibrary() {
         : 'Nothing here.<br>Try a different filter, or open a title and add it from there.'}</div>`));
     return;
   }
-  const grid = el('<div class="grid"></div>');
-  for (const item of visible) {
-    const card = el(`<div class="card ${item.stopped ? 'paused' : ''}">
-      ${item.poster_path
-        ? `<img loading="lazy" src="${posterUrl(item.poster_path, 'w185')}" alt="">`
-        : `<div class="noposter">${esc(item.title)}</div>`}
-      <div class="title">${esc(item.title)}</div>
-      <div class="progressbar" style="display:none"><div></div></div>
-      <div class="sub"></div>
-    </div>`);
-    const sub = card.querySelector('.sub');
-    if (item.media_type === 'movie') {
-      if (item.watched) card.prepend(el('<span class="badge done">✓ seen</span>'));
-      sub.textContent = 'Movie';
-    } else if (item.media_type === 'game') {
-      if (item.watched) card.prepend(el('<span class="badge done">✓ finished</span>'));
-      else if (item.stopped) card.prepend(el('<span class="badge paused">⏸ shelved</span>'));
-      else card.prepend(el('<span class="badge">Game</span>'));
-      sub.textContent = item.stopped ? 'Stopped playing' : 'Game';
-    } else if (item.stopped) {
-      card.prepend(el('<span class="badge paused">⏸ paused</span>'));
-      sub.textContent = 'Stopped watching';
-    } else {
-      sub.textContent = item.watched_episodes ? `${item.watched_episodes} ep watched` : 'TV show';
-      card.prepend(el('<span class="badge">TV</span>'));
-      enrichCard(item, card);   // async: next-up + progress once TMDB answers
+
+  /* the group area is redrawn on its own so revalidation can repaint it */
+  const groupArea = el('<div></div>');
+  main.appendChild(groupArea);
+
+  /* verdicts we can decide right now: movies/games from Pi data, TV from the
+     device cache; unknown TV is provisionally "up next" (never hidden). */
+  const syncVerdicts = () => {
+    const v = new Map();
+    for (const i of visible) {
+      if (i.media_type !== 'tv') continue;
+      const c = caughtUpCache[i.tmdb_id];
+      if (c && c.watched === i.watched_episodes) v.set(i.id, c.caughtUp ? null : true);
     }
-    card.onclick = () => openDetail(item.media_type, item.tmdb_id, item.title);
-    grid.appendChild(card);
+    return v;
+  };
+
+  const tvVisible = visible.filter(i => i.media_type === 'tv' && !i.stopped);
+  const anyCached = tvVisible.some(i => {
+    const c = caughtUpCache[i.tmdb_id];
+    return c && c.watched === i.watched_episodes;
+  });
+
+  if (tvVisible.length && !anyCached) {
+    /* truly cold (first-ever open on this device): resolve before first paint
+       so caught-up shows don't visibly jump groups. one-time only. */
+    groupArea.innerHTML = '<div class="spin">Organizing…</div>';
+    const verdicts = await resolveNextUp(visible);
+    paintGroups(groupArea, visible, verdicts);
+    return;
   }
-  main.appendChild(grid);
+
+  /* instant paint from cache, then quietly revalidate against TMDB */
+  const cached = syncVerdicts();
+  paintGroups(groupArea, visible, cached);
+  const sigBefore = groupSig(visible, cached);
+  const fresh = await resolveNextUp(visible);
+  if (tab === 'library' && groupSig(visible, fresh) !== sigBefore)
+    paintGroups(groupArea, visible, fresh);
+}
+
+/* build one library card (poster, badges, sub-label, click, async enrich) */
+function libraryCard(item) {
+  const card = el(`<div class="card ${item.stopped ? 'paused' : ''}">
+    ${item.poster_path
+      ? `<img loading="lazy" src="${posterUrl(item.poster_path, 'w185')}" alt="">`
+      : `<div class="noposter">${esc(item.title)}</div>`}
+    <div class="title">${esc(item.title)}</div>
+    <div class="progressbar" style="display:none"><div></div></div>
+    <div class="sub"></div>
+  </div>`);
+  const sub = card.querySelector('.sub');
+  if (item.media_type === 'movie') {
+    if (item.watched) card.prepend(el('<span class="badge done">✓ seen</span>'));
+    sub.textContent = 'Movie';
+  } else if (item.media_type === 'game') {
+    if (item.watched) card.prepend(el('<span class="badge done">✓ finished</span>'));
+    else if (item.stopped) card.prepend(el('<span class="badge paused">⏸ shelved</span>'));
+    else card.prepend(el('<span class="badge">Game</span>'));
+    sub.textContent = item.stopped ? 'Stopped playing' : 'Game';
+  } else if (item.stopped) {
+    card.prepend(el('<span class="badge paused">⏸ paused</span>'));
+    sub.textContent = 'Stopped watching';
+  } else {
+    sub.textContent = item.watched_episodes ? `${item.watched_episodes} ep watched` : 'TV show';
+    card.prepend(el('<span class="badge">TV</span>'));
+    enrichCard(item, card);   // async: next-up + progress once TMDB answers
+  }
+  card.onclick = () => openDetail(item.media_type, item.tmdb_id, item.title);
+  return card;
+}
+function fillGrid(grid, items) { for (const i of items) grid.appendChild(libraryCard(i)); }
+
+/* which group a title belongs to, given a caught-up verdict for TV shows
+   (null = caught up on aired). movies/games use their Pi flags. */
+function groupOf(item, verdicts) {
+  if (item.stopped) return 'stopped';
+  if (item.media_type === 'movie' || item.media_type === 'game')
+    return item.watched ? 'done' : 'upnext';
+  return verdicts.get(item.id) === null ? 'done' : 'upnext';   // tv
+}
+function partition(visible, verdicts) {
+  const g = { upnext: [], done: [], stopped: [] };
+  for (const i of visible) g[groupOf(i, verdicts)].push(i);
+  return g;
+}
+function groupSig(visible, verdicts) {
+  return visible.map(i => `${i.id}:${groupOf(i, verdicts)}`).join(',');
+}
+
+function paintGroups(container, visible, verdicts) {
+  const g = partition(visible, verdicts);
+  const hasTail = g.done.length || g.stopped.length;
+  container.innerHTML = '';
+
+  if (g.upnext.length) {
+    if (hasTail) container.appendChild(el('<h3 class="section" style="margin-top:6px">▶ Up next</h3>'));
+    const grid = el('<div class="grid"></div>');
+    fillGrid(grid, g.upnext);
+    container.appendChild(grid);
+  } else if (hasTail) {
+    container.appendChild(el('<div class="empty" style="padding:24px 16px">You’re all caught up ✓</div>'));
+  }
+
+  for (const [key, label, list] of [['done', '✓ Watched it all', g.done], ['stopped', '⏸ Stopped', g.stopped]]) {
+    if (!list.length) continue;
+    const open = libGroups[key];
+    const head = el(`<div class="grp-head ${open ? 'open' : ''}">
+      <span class="chev">›</span><span class="name">${label}</span><span class="count">${list.length}</span></div>`);
+    const grid = el(`<div class="grid" ${open ? '' : 'style="display:none"'}></div>`);
+    fillGrid(grid, list);
+    head.onclick = () => {
+      libGroups[key] = !libGroups[key];
+      localStorage.setItem('watchpi_lib_groups', JSON.stringify(libGroups));
+      head.classList.toggle('open', libGroups[key]);
+      grid.style.display = libGroups[key] ? '' : 'none';
+    };
+    container.appendChild(head);
+    container.appendChild(grid);
+  }
+}
+
+/* resolve caught-up status for TV shows via TMDB, updating the device cache */
+async function resolveNextUp(visible) {
+  const map = new Map();
+  await Promise.all(visible.filter(i => i.media_type === 'tv' && !i.stopped).map(async item => {
+    try {
+      const ck = `tv:${item.tmdb_id}`;
+      const d = detailCache[ck] || await tmdb(`/tv/${item.tmdb_id}`, { append_to_response: 'watch/providers' });
+      detailCache[ck] = d;
+      const next = nextUpAired(d, watchedSetOf(item));
+      map.set(item.id, next);
+      caughtUpCache[item.tmdb_id] = { watched: item.watched_episodes, caughtUp: next === null };
+    } catch { /* offline / no key — leave unset, treated as up next */ }
+  }));
+  try { localStorage.setItem('watchpi_caughtup', JSON.stringify(caughtUpCache)); } catch {}
+  return map;
 }
 
 /* upgrade a TV card with "Next: SxEy" + progress toward the show total */
@@ -498,7 +617,7 @@ async function enrichCard(item, card) {
     const ck = `tv:${item.tmdb_id}`;
     const d = detailCache[ck] || await tmdb(`/tv/${item.tmdb_id}`, { append_to_response: 'watch/providers' });
     detailCache[ck] = d;
-    const next = computeNextUp(d, watchedSetOf(item));
+    const next = nextUpAired(d, watchedSetOf(item));
     const total = d.number_of_episodes || 0;
     const sub = card.querySelector('.sub');
     let txt = next ? `Next: S${next.s}E${next.e}` : 'Caught up ✓';

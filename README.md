@@ -98,6 +98,23 @@ movie watched flags) is per profile. The app shows a "Who's watching?" picker
 on first launch; the chosen profile is remembered per device. Switch anytime
 via the name chip in the header.
 
+## Library groups
+
+The Library tab organizes titles into three groups, in order:
+
+- **▶ Up next** — things you can actually watch now: series with an unwatched
+  *aired* episode, unwatched movies, unfinished games. Always shown first.
+- **✓ Watched it all** — fully-watched movies, finished games, and series
+  you're caught up on (every aired episode seen). A caught-up show that's still
+  airing jumps back to Up next automatically the moment a new episode drops.
+- **⏸ Stopped** — abandoned/shelved titles, at the bottom.
+
+The bottom two groups are collapsible and start collapsed (remembered per
+device). "Caught up" needs each show's episode structure from TMDB, so the
+verdict is cached on your device — the library groups instantly on repeat
+opens, then quietly revalidates in the background. Grouping composes with the
+folder and Movies/Series/Games filter chips.
+
 ## Folders
 
 Organize the library with folders (chips at the top of the Library tab).
