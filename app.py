@@ -83,6 +83,15 @@ CREATE TABLE IF NOT EXISTS folder_items (
     PRIMARY KEY (folder_id, item_id)
 );
 
+-- Personal library membership: the library is PER PROFILE. An item is in a
+-- user's library if they own it here, or it sits in a folder they belong to.
+CREATE TABLE IF NOT EXISTS item_owners (
+    item_id  INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    added_at TEXT    NOT NULL,
+    PRIMARY KEY (item_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS folder_members (
     folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
     user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -179,6 +188,27 @@ def init_db():
             ALTER TABLE items_new RENAME TO items;
             PRAGMA foreign_keys=ON;
         """)
+    # v6 migration: the library becomes per-profile. Seed item_owners from
+    # existing engagement, since the old schema recorded no adder. A user owns
+    # an item they have any progress on; items nobody engaged with and not in
+    # any folder are provenance-less orphans → owned by everyone (prunable).
+    if not con.execute("SELECT 1 FROM item_owners LIMIT 1").fetchone():
+        ts = now()
+        con.execute(
+            """INSERT OR IGNORE INTO item_owners (item_id, user_id, added_at)
+               SELECT item_id, user_id, ? FROM (
+                   SELECT item_id, user_id FROM episodes
+                   UNION SELECT item_id, user_id FROM movie_watches
+                   UNION SELECT item_id, user_id FROM stopped)""",
+            (ts,),
+        )
+        con.execute(
+            """INSERT OR IGNORE INTO item_owners (item_id, user_id, added_at)
+               SELECT i.id, u.id, ? FROM items i CROSS JOIN users u
+               WHERE i.id NOT IN (SELECT item_id FROM item_owners)
+                 AND i.id NOT IN (SELECT item_id FROM folder_items)""",
+            (ts,),
+        )
     con.commit()
     con.close()
 
@@ -232,6 +262,15 @@ def folder_member_ids(db, folder_id):
     ).fetchall()]
 
 
+def ensure_owner(db, item_id, user_id):
+    """Record that an item is in a user's personal library (idempotent).
+    Called on add and whenever the user gains watch progress on the item."""
+    db.execute(
+        "INSERT OR IGNORE INTO item_owners (item_id, user_id, added_at) VALUES (?,?,?)",
+        (item_id, user_id, now()),
+    )
+
+
 def copy_progress(db, item_id, from_user, to_users):
     """Replace to_users' progress on an item with from_user's (episodes and
     movie watched flag) — the folder tracks one shared position."""
@@ -258,6 +297,8 @@ def copy_progress(db, item_id, from_user, to_users):
                 "INSERT INTO movie_watches (item_id, user_id, watched_at) VALUES (?,?,?)",
                 (item_id, u, mv["watched_at"]),
             )
+        if eps or mv:
+            ensure_owner(db, item_id, u)   # gained progress → in their library
 
 
 # ---------------------------------------------------------------- users
@@ -320,14 +361,19 @@ def list_library():
                WHERE e.item_id = i.id AND e.user_id = :u)          AS last_ep_watched,
              (SELECT watched_at FROM movie_watches m
                WHERE m.item_id = i.id AND m.user_id = :u)          AS movie_watched_at
-           FROM items i ORDER BY i.added_at DESC""",
+           FROM items i
+           WHERE i.id IN (SELECT item_id FROM item_owners WHERE user_id = :u)
+              OR i.id IN (SELECT fi.item_id FROM folder_items fi
+                          JOIN folder_members fm ON fm.folder_id = fi.folder_id
+                          WHERE fm.user_id = :u)
+           ORDER BY i.added_at DESC""",
         {"u": user["id"]},
     ).fetchall()
-    # folder memberships (only folders this user can see: shared or their own)
+    # folder memberships this user can see (folders they belong to)
     memberships = db.execute(
         """SELECT fi.item_id, fi.folder_id FROM folder_items fi
-           JOIN folders f ON f.id = fi.folder_id
-           WHERE f.owner_id IS NULL OR f.owner_id = ?""",
+           JOIN folder_members fm ON fm.folder_id = fi.folder_id
+           WHERE fm.user_id = ?""",
         (user["id"],),
     ).fetchall()
     by_item = {}
@@ -353,6 +399,9 @@ def list_library():
 
 @app.post("/api/library")
 def add_item():
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
     data = request.get_json(silent=True) or {}
     try:
         tmdb_id = int(data["tmdb_id"])
@@ -364,28 +413,46 @@ def add_item():
         return jsonify(error="invalid media_type or empty title"), 400
 
     db = get_db()
-    try:
-        cur = db.execute(
-            "INSERT INTO items (tmdb_id, media_type, title, poster_path, added_at) VALUES (?,?,?,?,?)",
-            (tmdb_id, media_type, title, data.get("poster_path"), now()),
-        )
+    row = db.execute(
+        "SELECT * FROM items WHERE tmdb_id=? AND media_type=?", (tmdb_id, media_type)
+    ).fetchone()
+    if row:
+        already = db.execute(
+            "SELECT 1 FROM item_owners WHERE item_id=? AND user_id=?", (row["id"], user["id"])
+        ).fetchone() is not None
+        ensure_owner(db, row["id"], user["id"])
         db.commit()
-    except sqlite3.IntegrityError:
-        row = db.execute(
-            "SELECT * FROM items WHERE tmdb_id=? AND media_type=?", (tmdb_id, media_type)
-        ).fetchone()
-        return jsonify(item_to_dict(row)), 200  # already in library — idempotent (shared)
+        return jsonify(item_to_dict(row)), (200 if already else 201)
+    cur = db.execute(
+        "INSERT INTO items (tmdb_id, media_type, title, poster_path, added_at) VALUES (?,?,?,?,?)",
+        (tmdb_id, media_type, title, data.get("poster_path"), now()),
+    )
+    ensure_owner(db, cur.lastrowid, user["id"])
+    db.commit()
     row = db.execute("SELECT * FROM items WHERE id=?", (cur.lastrowid,)).fetchone()
     return jsonify(item_to_dict(row)), 201
 
 
 @app.delete("/api/library/<int:item_id>")
 def delete_item(item_id):
+    """Remove the item from THIS user's library (?user=<id>): drop their
+    ownership and personal progress. The shared catalog row is deleted only
+    when no one owns it and no folder references it."""
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
     db = get_db()
-    cur = db.execute("DELETE FROM items WHERE id=?", (item_id,))
-    db.commit()
-    if cur.rowcount == 0:
+    if not db.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone():
         return jsonify(error="not found"), 404
+    for tbl in ("item_owners", "episodes", "movie_watches", "stopped"):
+        db.execute(f"DELETE FROM {tbl} WHERE item_id=? AND user_id=?", (item_id, user["id"]))
+    orphan = (
+        db.execute("SELECT 1 FROM item_owners WHERE item_id=?", (item_id,)).fetchone() is None
+        and db.execute("SELECT 1 FROM folder_items WHERE item_id=?", (item_id,)).fetchone() is None
+    )
+    if orphan:
+        db.execute("DELETE FROM items WHERE id=?", (item_id,))
+    db.commit()
     return "", 204
 
 
@@ -413,6 +480,8 @@ def update_item(item_id):
                 "INSERT OR IGNORE INTO movie_watches (item_id, user_id, watched_at) VALUES (?,?,?)",
                 [(item_id, u, now()) for u in uids],
             )
+            for u in uids:
+                ensure_owner(db, item_id, u)   # marking watched puts it in their library
         else:
             db.executemany(
                 "DELETE FROM movie_watches WHERE item_id=? AND user_id=?",
@@ -492,6 +561,8 @@ def set_episodes(item_id):
             "INSERT OR IGNORE INTO episodes (item_id, user_id, season, episode, watched_at) VALUES (?,?,?,?,?)",
             [(item_id, u, s, e, ts) for u in uids for s, e in pairs],
         )
+        for u in uids:
+            ensure_owner(db, item_id, u)   # watching it puts it in their library
     else:
         db.executemany(
             "DELETE FROM episodes WHERE item_id=? AND user_id=? AND season=? AND episode=?",
