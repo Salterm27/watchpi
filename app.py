@@ -118,6 +118,15 @@ CREATE TABLE IF NOT EXISTS suggestions (
     seed_hash TEXT NOT NULL,
     data      TEXT NOT NULL
 );
+
+-- Titles a user never wants suggested again ("not interested" ✕).
+CREATE TABLE IF NOT EXISTS suggestion_hides (
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    media_type TEXT    NOT NULL CHECK (media_type IN ('movie', 'tv', 'game')),
+    tmdb_id    INTEGER NOT NULL,
+    hidden_at  TEXT    NOT NULL,
+    PRIMARY KEY (user_id, media_type, tmdb_id)
+);
 """
 
 
@@ -822,16 +831,62 @@ def get_suggestions():
     user = current_user()
     if user is None:
         return jsonify(error="valid ?user=<id> is required"), 400
-    row = get_db().execute(
+    db = get_db()
+    hidden = [
+        f"{r['media_type']}:{r['tmdb_id']}" for r in db.execute(
+            "SELECT media_type, tmdb_id FROM suggestion_hides WHERE user_id=?", (user["id"],)
+        ).fetchall()
+    ]
+    row = db.execute(
         "SELECT built_at, seed_hash, data FROM suggestions WHERE user_id=?", (user["id"],)
     ).fetchone()
     if not row:
-        return jsonify(built_at=None, seed_hash=None, items=[])
+        return jsonify(built_at=None, seed_hash=None, items=[], hidden=hidden)
     try:
         items = json.loads(row["data"])
     except ValueError:
         items = []
-    return jsonify(built_at=row["built_at"], seed_hash=row["seed_hash"], items=items)
+    return jsonify(built_at=row["built_at"], seed_hash=row["seed_hash"], items=items, hidden=hidden)
+
+
+@app.put("/api/suggestions/hide")
+def set_suggestion_hide():
+    """Body: {"media_type", "tmdb_id", "hidden": bool} — 'not interested' flag."""
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    data = request.get_json(silent=True) or {}
+    media_type = data.get("media_type")
+    tmdb_id = data.get("tmdb_id")
+    hidden = data.get("hidden")
+    if media_type not in ("movie", "tv", "game") or not isinstance(tmdb_id, int) \
+            or not isinstance(hidden, bool):
+        return jsonify(error="media_type, tmdb_id (int) and hidden (bool) are required"), 400
+    db = get_db()
+    if hidden:
+        db.execute(
+            "INSERT OR IGNORE INTO suggestion_hides (user_id, media_type, tmdb_id, hidden_at) VALUES (?,?,?,?)",
+            (user["id"], media_type, tmdb_id, now()),
+        )
+    else:
+        db.execute(
+            "DELETE FROM suggestion_hides WHERE user_id=? AND media_type=? AND tmdb_id=?",
+            (user["id"], media_type, tmdb_id),
+        )
+    db.commit()
+    return jsonify(ok=True)
+
+
+@app.delete("/api/suggestions/hide")
+def clear_suggestion_hides():
+    """Reset the user's whole 'not interested' list."""
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    db = get_db()
+    db.execute("DELETE FROM suggestion_hides WHERE user_id=?", (user["id"],))
+    db.commit()
+    return "", 204
 
 
 @app.put("/api/suggestions")
