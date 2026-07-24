@@ -284,7 +284,7 @@ async function loadConfig() {
   } catch { /* Pi unreachable — views show their own errors */ }
 }
 
-/* Current profile. The library is shared; watch progress is per profile. */
+/* Current profile. Each profile has its own library; sharing is via folders. */
 let USER = null;     // {id, name}
 let USERS = [];
 function userQ() { return USER ? `user=${USER.id}` : ''; }
@@ -1251,7 +1251,7 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
     add.onclick = async () => {
       add.disabled = true;
       try {
-        await api('/library', { method: 'POST', body: {
+        await api(`/library?${userQ()}`, { method: 'POST', body: {
           tmdb_id: d.id, media_type: mediaType, title, poster_path: poster } });
         await loadLibrary();
         toast('Added to library');
@@ -1309,7 +1309,7 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
     const rm = el('<button class="btn danger">Remove</button>');
     rm.onclick = async () => {
       if (!confirm(`Remove “${title}” and its watch history?`)) return;
-      await api(`/library/${item.id}`, { method: 'DELETE' });
+      await api(`/library/${item.id}?${userQ()}`, { method: 'DELETE' });
       await loadLibrary();
       toast('Removed');
       closeSheet();
@@ -1536,7 +1536,7 @@ function openProfilePicker(closable = true) {
   sheet.innerHTML = `
     <div class="grabber"></div>
     <h2 style="margin-bottom:4px">Who's watching?</h2>
-    <p class="hint" style="margin-bottom:16px">The library is shared — episode progress is yours.</p>
+    <p class="hint" style="margin-bottom:16px">Each profile has its own library and progress; share via folders.</p>
     <div id="profile-list"></div>
     <div class="field" style="margin-top:14px">
       <label>Add a person</label>

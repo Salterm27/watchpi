@@ -4,8 +4,9 @@ A personal JustWatch-style tracker built for a Raspberry Pi 2.
 
 **Architecture:** the browser fetches all metadata (search, posters, streaming
 availability) directly from TMDB. The Pi only stores your personal state —
-library and watched episodes — in one SQLite file. The server never makes an
-outbound request, so it stays fast on 1GB of RAM and your backup is tiny.
+each profile's library and watched episodes — in one SQLite file. The server
+never makes an outbound request, so it stays fast on 1GB of RAM and your backup
+is tiny.
 
 ```
 Phone browser ──► TMDB API      (search, posters, "where to watch")
@@ -93,10 +94,13 @@ restic restore latest --target /tmp/restore-test
 
 ## Profiles
 
-The library is shared between everyone; watch progress (episode checkmarks,
-movie watched flags) is per profile. The app shows a "Who's watching?" picker
-on first launch; the chosen profile is remembered per device. Switch anytime
-via the name chip in the header.
+Each profile has its **own library** — you see only the titles you added, plus
+anything in a shared folder you belong to (see Folders). Watch progress
+(episode checkmarks, movie watched flags) is per profile too. Adding a title,
+or watching any of it, puts it in your library; a title you engage with via a
+shared folder stays yours even if it later leaves the folder. The app shows a
+"Who's watching?" picker on first launch; the chosen profile is remembered per
+device. Switch anytime via the name chip in the header.
 
 ## Library groups
 
@@ -226,9 +230,9 @@ watch timestamp for the requesting profile — used for the Series sort).
 | POST   | /api/users                        | `{name}`                                          |
 | DELETE | /api/users/:id                    | —                                                 |
 | GET    | /api/library (u)                  | — (`&include=episodes` adds per-item episode lists) |
-| POST   | /api/library                      | `{tmdb_id, media_type, title, poster_path}` (`media_type`: movie/tv/game; RAWG id for games) |
+| POST   | /api/library (u)                  | `{tmdb_id, media_type, title, poster_path}` (`media_type`: movie/tv/game; RAWG id for games) |
 | PATCH  | /api/library/:id (u)              | `{watched?: bool}` (movies) and/or `{stopped?: bool}` |
-| DELETE | /api/library/:id                  | —                                                 |
+| DELETE | /api/library/:id (u)              | — (removes from your library only)                |
 | GET    | /api/library/:id/episodes (u)     | —                                                 |
 | PUT    | /api/library/:id/episodes (u)     | `{episodes: [{season, episode}], watched: bool}`  |
 | GET    | /api/folders (u)                  | — (folders you're a member of, incl. `members`)   |

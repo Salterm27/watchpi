@@ -7,8 +7,8 @@ def make_user(client, name):
     return r.get_json()["id"]
 
 
-def add_item(client, tmdb_id=1, media_type="tv", title="Show"):
-    r = client.post("/api/library", json={"tmdb_id": tmdb_id, "media_type": media_type, "title": title})
+def add_item(client, uid, tmdb_id=1, media_type="tv", title="Show"):
+    r = client.post(f"/api/library?user={uid}", json={"tmdb_id": tmdb_id, "media_type": media_type, "title": title})
     assert r.status_code in (200, 201)
     return r.get_json()["id"]
 
@@ -16,6 +16,10 @@ def add_item(client, tmdb_id=1, media_type="tv", title="Show"):
 def get_item(client, uid, item_id):
     items = client.get(f"/api/library?user={uid}").get_json()
     return next(i for i in items if i["id"] == item_id)
+
+
+def in_library(client, uid, item_id):
+    return any(i["id"] == item_id for i in client.get(f"/api/library?user={uid}").get_json())
 
 
 def mark_episodes(client, uid, item_id, pairs, watched=True):
@@ -61,25 +65,37 @@ def test_library_requires_user(client):
     assert client.get("/api/library").status_code == 400
 
 
-def test_library_add_is_idempotent_and_shared(client):
-    uid = make_user(client, "Ana")
-    r1 = client.post("/api/library", json={"tmdb_id": 7, "media_type": "movie", "title": "Heat"})
-    r2 = client.post("/api/library", json={"tmdb_id": 7, "media_type": "movie", "title": "Heat"})
+def test_library_add_is_idempotent_per_profile(client):
+    ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
+    r1 = client.post(f"/api/library?user={ana}", json={"tmdb_id": 7, "media_type": "movie", "title": "Heat"})
+    r2 = client.post(f"/api/library?user={ana}", json={"tmdb_id": 7, "media_type": "movie", "title": "Heat"})
     assert (r1.status_code, r2.status_code) == (201, 200)
     assert r1.get_json()["id"] == r2.get_json()["id"]
-    assert len(client.get(f"/api/library?user={uid}").get_json()) == 1
+    assert len(client.get(f"/api/library?user={ana}").get_json()) == 1
+    # Ana's title is NOT in Bob's library
+    assert client.get(f"/api/library?user={bob}").get_json() == []
+    # Bob adding the same tmdb reuses the catalog row but appears in Bob's library
+    r3 = client.post(f"/api/library?user={bob}", json={"tmdb_id": 7, "media_type": "movie", "title": "Heat"})
+    assert r3.get_json()["id"] == r1.get_json()["id"]
+    assert in_library(client, bob, r1.get_json()["id"])
 
 
-def test_library_delete(client):
-    uid = make_user(client, "Ana")
-    item = add_item(client)
-    assert client.delete(f"/api/library/{item}").status_code == 204
-    assert client.get(f"/api/library?user={uid}").get_json() == []
+def test_library_add_requires_user(client):
+    assert client.post("/api/library", json={"tmdb_id": 1, "media_type": "tv", "title": "X"}).status_code == 400
+
+
+def test_library_delete_is_per_profile(client):
+    ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
+    item = add_item(client, ana)
+    add_item(client, bob, tmdb_id=1)   # same title, Bob owns it too
+    assert client.delete(f"/api/library/{item}?user={ana}").status_code == 204
+    assert client.get(f"/api/library?user={ana}").get_json() == []
+    assert in_library(client, bob, item)   # still Bob's
 
 
 def test_library_include_episodes_and_last_watched(client):
     uid = make_user(client, "Ana")
-    item = add_item(client)
+    item = add_item(client, uid)
     mark_episodes(client, uid, item, [(1, 1), (1, 2)])
     d = next(i for i in client.get(f"/api/library?user={uid}&include=episodes").get_json() if i["id"] == item)
     assert sorted(d["episodes"]) == [[1, 1], [1, 2]]
@@ -91,7 +107,7 @@ def test_library_include_episodes_and_last_watched(client):
 
 def test_patch_movie_watched(client):
     uid = make_user(client, "Ana")
-    item = add_item(client, media_type="movie", title="Heat")
+    item = add_item(client, uid, media_type="movie", title="Heat")
     r = client.patch(f"/api/library/{item}?user={uid}", json={"watched": True})
     assert r.status_code == 200 and r.get_json()["watched"] is True
     assert get_item(client, uid, item)["watched"] is True
@@ -99,7 +115,7 @@ def test_patch_movie_watched(client):
 
 def test_patch_reports_real_episode_count(client):
     uid = make_user(client, "Ana")
-    item = add_item(client)
+    item = add_item(client, uid)
     mark_episodes(client, uid, item, [(1, 1), (1, 2), (1, 3)])
     r = client.patch(f"/api/library/{item}?user={uid}", json={"stopped": True})
     assert r.get_json()["watched_episodes"] == 3
@@ -107,7 +123,8 @@ def test_patch_reports_real_episode_count(client):
 
 def test_stopped_is_personal(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    item = add_item(client)
+    item = add_item(client, ana)
+    add_item(client, bob, tmdb_id=1)   # both own the same title
     client.patch(f"/api/library/{item}?user={ana}", json={"stopped": True})
     assert get_item(client, ana, item)["stopped"] is True
     assert get_item(client, bob, item)["stopped"] is False
@@ -117,7 +134,7 @@ def test_stopped_is_personal(client):
 
 def test_episode_toggle(client):
     uid = make_user(client, "Ana")
-    item = add_item(client)
+    item = add_item(client, uid)
     assert mark_episodes(client, uid, item, [(1, 1)])["watched_episodes"] == 1
     assert mark_episodes(client, uid, item, [(1, 1)], watched=False)["watched_episodes"] == 0
 
@@ -133,7 +150,7 @@ def test_private_folder_hidden_from_others(client):
 
 def test_private_folder_protected_from_others(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    item = add_item(client)
+    item = add_item(client, ana)
     fid = make_folder(client, ana, "Mine", shared=False)
     assert put_in_folder(client, bob, fid, item).status_code == 403
     assert client.delete(f"/api/folders/{fid}?user={bob}").status_code == 403
@@ -141,12 +158,12 @@ def test_private_folder_protected_from_others(client):
 
 def test_shared_folder_syncs_episodes(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    item = add_item(client)
+    item = add_item(client, ana)
     fid = make_folder(client, ana, "Together", shared=True)
     assert put_in_folder(client, ana, fid, item).status_code == 200
     out = mark_episodes(client, ana, item, [(1, 1)])
     assert out["synced"] is True
-    assert get_item(client, bob, item)["watched_episodes"] == 1
+    assert get_item(client, bob, item)["watched_episodes"] == 1   # visible via shared folder
     # un-marking syncs too
     mark_episodes(client, ana, item, [(1, 1)], watched=False)
     assert get_item(client, bob, item)["watched_episodes"] == 0
@@ -154,7 +171,7 @@ def test_shared_folder_syncs_episodes(client):
 
 def test_shared_folder_syncs_movie_watched(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    item = add_item(client, media_type="movie", title="Heat")
+    item = add_item(client, ana, media_type="movie", title="Heat")
     fid = make_folder(client, ana, "Together", shared=True)
     put_in_folder(client, ana, fid, item)
     client.patch(f"/api/library/{item}?user={ana}", json={"watched": True})
@@ -163,18 +180,18 @@ def test_shared_folder_syncs_movie_watched(client):
 
 def test_private_folder_does_not_sync(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    item = add_item(client)
+    item = add_item(client, ana)
     fid = make_folder(client, ana, "Mine", shared=False)
     put_in_folder(client, ana, fid, item)
     assert mark_episodes(client, ana, item, [(1, 1)])["synced"] is False
-    assert get_item(client, bob, item)["watched_episodes"] == 0
+    assert not in_library(client, bob, item)   # private → Bob can't see it at all
 
 
 # ---------------------------------------------------------------- feed
 
 def test_feed_shows_only_other_users(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    item = add_item(client)
+    item = add_item(client, ana)
     mark_episodes(client, ana, item, [(1, 1)])
     assert client.get(f"/api/feed?user={ana}").get_json() == []
     feed = client.get(f"/api/feed?user={bob}").get_json()
@@ -213,17 +230,17 @@ def test_restricted_folder_visible_to_members_only(client):
 
 def test_restricted_folder_syncs_members_only(client):
     ana, bob, carla = make_user(client, "Ana"), make_user(client, "Bob"), make_user(client, "Carla")
-    item = add_item(client)
+    item = add_item(client, ana)
     f = make_folder_with(client, ana, "Us two", [bob])
     put_in_folder(client, ana, f["id"], item)
     mark_episodes(client, ana, item, [(1, 1)])
     assert get_item(client, bob, item)["watched_episodes"] == 1
-    assert get_item(client, carla, item)["watched_episodes"] == 0
+    assert not in_library(client, carla, item)   # not a member → can't see it
 
 
 def test_any_member_can_manage(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    item = add_item(client)
+    item = add_item(client, ana)
     f = make_folder_with(client, ana, "Us two", [bob])
     # bob (member, not creator) can add items and delete the folder
     assert put_in_folder(client, bob, f["id"], item).status_code == 200
@@ -232,7 +249,7 @@ def test_any_member_can_manage(client):
 
 def test_add_to_shared_folder_copies_adders_progress(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    item = add_item(client)
+    item = add_item(client, ana)
     mark_episodes(client, ana, item, [(1, 1), (1, 2)])          # ana at E2
     mark_episodes(client, bob, item, [(1, 1), (1, 2), (1, 3)])  # bob further, at E3
     f = make_folder_with(client, ana, "Us two", [bob])
@@ -243,7 +260,7 @@ def test_add_to_shared_folder_copies_adders_progress(client):
 
 def test_unshare_persists_progress(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    item = add_item(client)
+    item = add_item(client, ana)
     f = make_folder_with(client, ana, "Us two", [bob])
     put_in_folder(client, ana, f["id"], item)
     mark_episodes(client, ana, item, [(1, 1), (1, 2)])
@@ -256,7 +273,7 @@ def test_unshare_persists_progress(client):
 
 def test_new_member_gets_shared_position(client):
     ana, bob, carla = make_user(client, "Ana"), make_user(client, "Bob"), make_user(client, "Carla")
-    item = add_item(client)
+    item = add_item(client, ana)
     f = make_folder_with(client, ana, "Us two", [bob])
     put_in_folder(client, ana, f["id"], item)
     mark_episodes(client, ana, item, [(1, 1), (1, 2)])
@@ -279,7 +296,7 @@ def test_members_endpoint_requires_membership(client):
 
 def test_feed_shows_sync_events_to_members_only(client):
     ana, bob, carla = make_user(client, "Ana"), make_user(client, "Bob"), make_user(client, "Carla")
-    item = add_item(client)
+    item = add_item(client, ana)
     f = make_folder_with(client, ana, "Us two", [bob])
     put_in_folder(client, ana, f["id"], item)                  # sync event
     put_in_folder(client, ana, f["id"], item, member=False)    # unsync event
@@ -293,7 +310,7 @@ def test_feed_shows_sync_events_to_members_only(client):
 
 def test_private_folder_add_makes_no_feed_event(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    item = add_item(client)
+    item = add_item(client, ana)
     r = client.post(f"/api/folders?user={ana}", json={"name": "Mine", "member_ids": []})
     fid = r.get_json()["id"]
     put_in_folder(client, ana, fid, item)
@@ -323,7 +340,7 @@ def test_suggestions_validation(client):
 
 def test_game_add_and_finish(client):
     uid = make_user(client, "Ana")
-    g = add_item(client, tmdb_id=42, media_type="game", title="Hades")
+    g = add_item(client, uid, tmdb_id=42, media_type="game", title="Hades")
     r = client.patch(f"/api/library/{g}?user={uid}", json={"watched": True})
     assert r.status_code == 200 and r.get_json()["watched"] is True
     d = get_item(client, uid, g)
@@ -332,7 +349,7 @@ def test_game_add_and_finish(client):
 
 def test_game_syncs_in_shared_folder(client):
     ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
-    g = add_item(client, tmdb_id=42, media_type="game", title="Hades")
+    g = add_item(client, ana, tmdb_id=42, media_type="game", title="Hades")
     fid = make_folder(client, ana, "Games", shared=True)
     put_in_folder(client, ana, fid, g)
     client.patch(f"/api/library/{g}?user={ana}", json={"watched": True})
@@ -340,8 +357,8 @@ def test_game_syncs_in_shared_folder(client):
 
 
 def test_invalid_media_type_rejected(client):
-    make_user(client, "Ana")
-    r = client.post("/api/library", json={"tmdb_id": 1, "media_type": "book", "title": "X"})
+    uid = make_user(client, "Ana")
+    r = client.post(f"/api/library?user={uid}", json={"tmdb_id": 1, "media_type": "book", "title": "X"})
     assert r.status_code == 400
 
 
@@ -392,3 +409,34 @@ def test_v5_migration_allows_games_and_keeps_data():
     con.commit()
     assert con.execute("SELECT COUNT(*) FROM items WHERE media_type='game'").fetchone()[0] == 1
     con.close()
+
+
+# ---------------------------------------------------------------- per-profile library
+
+def test_others_watched_title_invisible(client):
+    """The reported bug: a title Sol watched must not appear in Sebas's library."""
+    sol, sebas = make_user(client, "Sol"), make_user(client, "Sebas")
+    agatha = add_item(client, sol, tmdb_id=99, title="Agatha All Along")
+    mark_episodes(client, sol, agatha, [(1, 1)])
+    assert in_library(client, sol, agatha)
+    assert not in_library(client, sebas, agatha)
+
+
+def test_shared_folder_grants_then_removal_keeps_owner(client):
+    sol, sebas = make_user(client, "Sol"), make_user(client, "Sebas")
+    agatha = add_item(client, sol, tmdb_id=99, title="Agatha All Along")
+    f = make_folder_with(client, sol, "Us", [sebas])
+    put_in_folder(client, sol, f["id"], agatha)
+    assert in_library(client, sebas, agatha)   # visible via shared folder
+    mark_episodes(client, sebas, agatha, [(1, 1)])  # engaging → becomes owner
+    put_in_folder(client, sol, f["id"], agatha, member=False)  # unshare
+    assert in_library(client, sebas, agatha)   # still his (he watched it)
+
+
+def test_remove_is_per_profile_shared_catalog_kept(client):
+    ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
+    item = add_item(client, ana, tmdb_id=5)
+    add_item(client, bob, tmdb_id=5)   # both own the one catalog row
+    assert client.delete(f"/api/library/{item}?user={ana}").status_code == 204
+    assert not in_library(client, ana, item)
+    assert in_library(client, bob, item)
