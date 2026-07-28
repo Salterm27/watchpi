@@ -279,14 +279,37 @@
 /* ============================================================ config */
 /* Config lives on the Pi (data/config.json) so every device shares the
    same TMDB key & region — enter it once, anywhere. */
-const S = { key: '', region: 'US', rawgKey: '' };
+const S = { key: '', region: 'US', rawgKey: '', platforms: [] };
 async function loadConfig() {
   try {
     const cfg = await api('/config');
     S.key = cfg.tmdb_key || '';
     S.region = cfg.region || 'US';
     S.rawgKey = cfg.rawg_key || '';
+    S.platforms = cfg.platforms || [];
   } catch { /* Pi unreachable — views show their own errors */ }
+}
+
+/* Consoles the household owns (settings). RAWG platform ids include the
+   previous generation where it's backwards compatible, so a PS4-only title
+   isn't hidden from a PS5 owner. Nintendo is Switch-only on purpose — RAWG's
+   "Nintendo" parent would drag in 3DS/Wii U/GameBoy. */
+const CONSOLES = [
+  { key: 'pc',          label: 'PC',              ids: [4] },
+  { key: 'playstation', label: 'PlayStation',     ids: [187, 18] },
+  { key: 'xbox',        label: 'Xbox',            ids: [186, 1] },
+  { key: 'switch',      label: 'Nintendo Switch', ids: [7] },
+];
+function platformIds() {
+  return CONSOLES.filter(c => S.platforms.includes(c.key)).flatMap(c => c.ids);
+}
+/* true when no console filter is configured, or the game runs on one of them */
+function onMyConsoles(game) {
+  const want = platformIds();
+  if (!want.length) return true;
+  const ids = (game.platforms || []).map(p => (p.platform || p).id)
+    .concat(game.platform_ids || []);
+  return ids.some(id => want.includes(id));
 }
 
 /* Current profile. Each profile has its own library; sharing is via folders. */
@@ -989,14 +1012,19 @@ async function buildSuggestions(seeds, hash) {
       for (const g of detail.value.genres || [])
         genreCount[g.slug] = (genreCount[g.slug] || 0) + 1;
     if (series.status === 'fulfilled')
-      (series.value.results || []).forEach((r, idx) => consider(r, 'game', 2, 6 - idx));
+      (series.value.results || []).filter(onMyConsoles)   // only what we can play
+        .forEach((r, idx) => consider(r, 'game', 2, 6 - idx));
   }));
   const topGenres = Object.entries(genreCount).sort((a, b) => b[1] - a[1])
     .slice(0, 3).map(([slug]) => slug);
   if (topGenres.length) {
     try {
-      const d = await rawg('/games', { genres: topGenres.join(','), ordering: '-metacritic', page_size: 24 });
-      (d.results || []).forEach((r, idx) => consider(r, 'game', 1, 24 - idx));
+      const params = { genres: topGenres.join(','), ordering: '-metacritic', page_size: 24 };
+      const ids = platformIds();
+      if (ids.length) params.platforms = ids.join(',');   // filtered server-side
+      const d = await rawg('/games', params);
+      (d.results || []).filter(onMyConsoles)
+        .forEach((r, idx) => consider(r, 'game', 1, 24 - idx));
     } catch { /* keep whatever candidates we have */ }
   }
 
@@ -1006,9 +1034,16 @@ async function buildSuggestions(seeds, hash) {
   const items = [
     ...ranked.filter(e => e.mt !== 'game').slice(0, SUGGEST.maxResults),
     ...ranked.filter(e => e.mt === 'game').slice(0, SUGGEST.gameResults),
-  ].map(e => ({ tmdb_id: e.r.id, media_type: e.mt, title: e.r.title || e.r.name,
-                poster_path: e.r.poster_path || e.r.background_image || null,
-                date: e.r.release_date || e.r.first_air_date || e.r.released || '' }));
+  ].map(e => {
+    const item = { tmdb_id: e.r.id, media_type: e.mt, title: e.r.title || e.r.name,
+                   poster_path: e.r.poster_path || e.r.background_image || null,
+                   date: e.r.release_date || e.r.first_air_date || e.r.released || '' };
+    /* remember a game's platforms so changing the console setting re-filters
+       the cached batch without waiting for a rebuild */
+    if (e.mt === 'game')
+      item.platform_ids = (e.r.platforms || []).map(p => (p.platform || p).id);
+    return item;
+  });
   await api(`/suggestions?${userQ()}`, { method: 'PUT', body: { seed_hash: hash, items } });
   return { built_at: new Date().toISOString(), seed_hash: hash, items };
 }
@@ -1044,7 +1079,8 @@ async function renderSuggestions() {
   const q = document.getElementById('q');
   if (!q || q.value.trim()) return;   // user started a search meanwhile
   let fresh = (sug ? sug.items : []).filter(r =>
-    !libIndex[`${r.media_type}:${r.tmdb_id}`] && !HIDDEN.has(`${r.media_type}:${r.tmdb_id}`));
+    !libIndex[`${r.media_type}:${r.tmdb_id}`] && !HIDDEN.has(`${r.media_type}:${r.tmdb_id}`)
+    && (r.media_type !== 'game' || onMyConsoles(r)));   // consoles you own
   if (searchType !== 'all') fresh = fresh.filter(r => r.media_type === searchType);
   if (!fresh.length) {
     box.innerHTML = `<div class="empty">Type to search.<br>
@@ -1133,7 +1169,7 @@ function renderSearch() {
     '<div class="empty">Add your TMDB API key in ⚙ settings first.</div>';
 }
 
-function searchCard(mediaType, id, title, poster, date) {
+function searchCard(mediaType, id, title, poster, date, offPlatform = false) {
   const inLib = libIndex[`${mediaType}:${id}`];
   const card = el(`<div class="card">
     ${poster
@@ -1141,8 +1177,10 @@ function searchCard(mediaType, id, title, poster, date) {
       : `<div class="noposter">${esc(title)}</div>`}
     ${inLib ? '<span class="badge done">✓ added</span>' : `<span class="badge">${mediaType}</span>`}
     <div class="title">${esc(title)}</div>
-    <div class="sub">${year(date)}</div>
+    <div class="sub">${year(date)}${offPlatform ? ' · not on your consoles' : ''}</div>
   </div>`);
+  /* search stays complete — titles you can't play are flagged, not hidden */
+  if (offPlatform) card.querySelector('.sub').style.color = 'var(--muted)';
   card.onclick = () => openDetail(mediaType, id, title);
   return card;
 }
@@ -1186,7 +1224,8 @@ async function doSearch(query) {
     box.appendChild(el(`<h3 class="section" ${shows.length ? '' : 'style="margin-top:0"'}>Games</h3>`));
     const grid = el('<div class="grid"></div>');
     for (const g of games)
-      grid.appendChild(searchCard('game', g.id, g.name, g.background_image, g.released));
+      grid.appendChild(searchCard('game', g.id, g.name, g.background_image, g.released,
+        !onMyConsoles(g)));
     box.appendChild(grid);
   }
 }
@@ -1416,9 +1455,13 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
     if ((d.platforms || []).length) {
       sheet.appendChild(el('<h3 class="section">Where to play</h3>'));
       const row = el('<div class="chips" style="flex-wrap:wrap;overflow:visible"></div>');
+      const mine = platformIds();
       for (const p of d.platforms)
-        row.appendChild(el(`<span class="chip" style="cursor:default">${esc(p.platform.name)}</span>`));
+        row.appendChild(el(`<span class="chip ${mine.includes(p.platform.id) ? 'active' : ''}"
+          style="cursor:default">${esc(p.platform.name)}</span>`));
       sheet.appendChild(row);
+      if (mine.length && !onMyConsoles(d))
+        sheet.appendChild(el('<div class="prov-note">Not on your consoles — change them in ⚙ settings.</div>'));
     }
     if (d.description_raw) {
       sheet.appendChild(el('<h3 class="section">About</h3>'));
@@ -1662,6 +1705,17 @@ function openSettings() {
       <div class="hint">Free at <a href="https://rawg.io/apidocs" target="_blank" rel="noopener">rawg.io/apidocs</a>.
       Adds a Games section to search and a Games filter in the library.</div>
     </div>
+    <div class="field">
+      <label>My consoles</label>
+      ${CONSOLES.map(c => `
+        <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer">
+          <input type="checkbox" class="set-console" value="${c.key}" style="width:auto"
+            ${S.platforms.includes(c.key) ? 'checked' : ''}> 🎮 ${c.label}
+        </label>`).join('')}
+      <div class="hint" style="margin-top:8px">Games you can't play stay out of suggestions
+      (search still shows them, flagged). Tick a console whenever you get one — leave all
+      unchecked to see everything.</div>
+    </div>
     <div class="btnrow">
       <button class="btn primary" id="set-save">Save</button>
       <button class="btn" onclick="closeSheet()">Cancel</button>
@@ -1671,13 +1725,19 @@ function openSettings() {
     const btn = document.getElementById('set-save');
     btn.disabled = true;
     try {
+      const consoles = [...document.querySelectorAll('.set-console:checked')].map(c => c.value);
+      const consolesChanged = consoles.join() !== [...S.platforms].sort().join();
       const cfg = await api('/config', { method: 'PUT', body: {
         tmdb_key: document.getElementById('set-key').value.trim(),
         region: (document.getElementById('set-region').value || 'US').toUpperCase(),
         rawg_key: document.getElementById('set-rawg').value.trim(),
+        platforms: consoles,
       }});
       S.key = cfg.tmdb_key; S.region = cfg.region; S.rawgKey = cfg.rawg_key || '';
+      S.platforms = cfg.platforms || [];
       detailCache = {}; // region affects providers
+      /* console change → rebuild suggestions now instead of waiting for Friday */
+      if (consolesChanged) { SUGGESTIONS = null; refreshSuggestions(true).catch(() => {}); }
       closeSheet();
       toast('Saved to the Pi');
       if (!USER) setTimeout(() => openProfilePicker(false), 300);

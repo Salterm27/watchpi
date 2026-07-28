@@ -192,6 +192,18 @@ they join folders, shared-progress sync, the Games filter chip, and the feed
 ("Ana finished Hades"). The detail sheet shows platforms, Metacritic and
 average playtime instead of streaming providers.
 
+**My consoles.** ⚙ Settings lists PC / PlayStation / Xbox / Nintendo Switch —
+tick the ones you own and games you can't play stay out of suggestions.
+Search still shows everything, just flagged "not on your consoles", so you can
+always look a title up and add it deliberately. The list is a live selection:
+tick a console the day you get one (suggestions rebuild immediately, no
+waiting for the Friday refresh) and untick it if it goes. Leave all unchecked
+to see everything — that's the default, so nothing changes until you opt in.
+Platform ids include the previous generation where it's backwards compatible
+(a PS4-only title still counts for a PS5 owner); Nintendo means Switch only,
+not 3DS/Wii U. Filtering by *subscription* (Game Pass, PS Plus) isn't possible
+— RAWG has no subscription catalog, only storefronts.
+
 ## New-episode alerts
 
 On open, the app records the visit and asks TMDB (browser-side, as always)
@@ -250,7 +262,7 @@ watch timestamp for the requesting profile — used for the Series sort).
 | DELETE | /api/suggestions/hide (u)         | — reset the user's "not interested" list          |
 | PUT    | /api/users/:id/seen               | `{}` → returns previous open time                 |
 | GET    | /api/config                       | —                                                 |
-| PUT    | /api/config                       | `{tmdb_key?, region?, rawg_key?}`                 |
+| PUT    | /api/config                       | `{tmdb_key?, region?, rawg_key?, platforms?}` (consoles: pc/playstation/xbox/switch) |
 | GET    | /api/health                       | —                                                 |
 
 ## Tests

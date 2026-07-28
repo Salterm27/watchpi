@@ -18,7 +18,9 @@ from flask import Flask, g, jsonify, request, send_from_directory
 
 DB_PATH = os.environ.get("WATCHPI_DB", os.path.join(os.path.dirname(__file__), "data", "watchpi.db"))
 CONFIG_PATH = os.path.join(os.path.dirname(DB_PATH), "config.json")
-DEFAULT_CONFIG = {"tmdb_key": "", "region": "US"}
+DEFAULT_CONFIG = {"tmdb_key": "", "region": "US", "platforms": []}
+# Consoles the household owns, used to filter game suggestions. Empty = no filter.
+CONSOLE_KEYS = {"pc", "playstation", "xbox", "switch"}
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
@@ -957,6 +959,11 @@ def set_config():
         if len(region) != 2 or not region.isalpha():
             return jsonify(error="region must be a 2-letter country code"), 400
         cfg["region"] = region
+    if "platforms" in data:
+        platforms = data["platforms"]
+        if not isinstance(platforms, list) or not set(platforms) <= CONSOLE_KEYS:
+            return jsonify(error=f"platforms must be a list of {sorted(CONSOLE_KEYS)}"), 400
+        cfg["platforms"] = sorted(set(platforms))
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)

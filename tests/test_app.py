@@ -477,3 +477,24 @@ def test_hide_validation(client):
     assert hide(client, uid, "book", 1).status_code == 400
     r = client.put(f"/api/suggestions/hide?user={uid}", json={"media_type": "tv", "tmdb_id": "x", "hidden": True})
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------- consoles config
+
+def test_platforms_roundtrip_and_clear(client):
+    got = client.put("/api/config", json={"platforms": ["switch", "pc"]}).get_json()
+    assert got["platforms"] == ["pc", "switch"]          # normalized/sorted
+    assert client.get("/api/config").get_json()["platforms"] == ["pc", "switch"]
+    assert client.put("/api/config", json={"platforms": []}).get_json()["platforms"] == []
+
+
+def test_platforms_defaults_to_empty(client):
+    assert client.get("/api/config").get_json()["platforms"] == []
+
+
+def test_platforms_rejects_unknown_console(client):
+    assert client.put("/api/config", json={"platforms": ["dreamcast"]}).status_code == 400
+
+
+def test_platforms_rejects_non_list(client):
+    assert client.put("/api/config", json={"platforms": "switch"}).status_code == 400
