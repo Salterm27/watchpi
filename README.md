@@ -192,6 +192,27 @@ they join folders, shared-progress sync, the Games filter chip, and the feed
 ("Ana finished Hades"). The detail sheet shows platforms, Metacritic and
 average playtime instead of streaming providers.
 
+## Inbox (quick-capture)
+
+Someone recommends a show and you're not near the app. Anything can POST the
+raw title to the Pi and it lands in your **inbox**; next time you open the app
+a 📥 banner on the Library tab lets you tap the right match to add it.
+
+```bash
+curl -X POST "http://<pi>:8001/api/inbox?user=1" \
+     -H 'Content-Type: application/json' \
+     -d '{"text":"Severance","source":"shortcut"}'
+```
+
+The capture is stored **unresolved on purpose** — the Pi never looks titles up,
+so the architecture above still holds. Your browser resolves it against TMDB
+when you open the app, which also means ambiguous names ("The Office") get a
+human choice instead of a server-side guess.
+
+Captures are per profile. An iOS Shortcut or Android automation pointed at that
+endpoint works **today on the home network**; a send-from-anywhere channel
+(a chat bot the Pi polls, needing no open ports) is the planned follow-up.
+
 ## New-episode alerts
 
 On open, the app records the visit and asks TMDB (browser-side, as always)
@@ -244,6 +265,9 @@ watch timestamp for the requesting profile — used for the Series sort).
 | DELETE | /api/folders/:id (u)              | —                                                 |
 | PUT    | /api/folders/:id/items (u)        | `{item_id, member: bool}` (add copies your progress to members) |
 | GET    | /api/feed (u)                     | —                                                 |
+| GET    | /api/inbox (u)                    | — pending quick-captures, newest first            |
+| POST   | /api/inbox (u)                    | `{text, source?}` (unresolved title, 1-500 chars) |
+| DELETE | /api/inbox/:id (u)                | — discard a capture                               |
 | GET    | /api/suggestions (u)              | — cached batch `{built_at, seed_hash, items, hidden}`   |
 | PUT    | /api/suggestions (u)              | `{seed_hash, items}` (browser-built, see Suggestions) |
 | PUT    | /api/suggestions/hide (u)         | `{media_type, tmdb_id, hidden: bool}` ("not interested") |

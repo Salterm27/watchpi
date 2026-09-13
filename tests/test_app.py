@@ -477,3 +477,65 @@ def test_hide_validation(client):
     assert hide(client, uid, "book", 1).status_code == 400
     r = client.put(f"/api/suggestions/hide?user={uid}", json={"media_type": "tv", "tmdb_id": "x", "hidden": True})
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------- inbox (quick-capture)
+
+def capture(client, uid, text, source=None):
+    body = {"text": text}
+    if source:
+        body["source"] = source
+    return client.post(f"/api/inbox?user={uid}", json=body)
+
+
+def test_capture_roundtrip(client):
+    uid = make_user(client, "Ana")
+    r = capture(client, uid, "Severance", source="telegram")
+    assert r.status_code == 201
+    row = r.get_json()
+    assert row["text"] == "Severance" and row["source"] == "telegram"
+    listed = client.get(f"/api/inbox?user={uid}").get_json()
+    assert [i["text"] for i in listed] == ["Severance"]
+    assert client.delete(f"/api/inbox/{row['id']}?user={uid}").status_code == 204
+    assert client.get(f"/api/inbox?user={uid}").get_json() == []
+
+
+def test_capture_defaults_source_and_trims(client):
+    uid = make_user(client, "Ana")
+    row = capture(client, uid, "  The Office  ").get_json()
+    assert row["text"] == "The Office" and row["source"] == "api"
+
+
+def test_capture_is_per_profile(client):
+    ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
+    capture(client, ana, "Severance")
+    assert len(client.get(f"/api/inbox?user={ana}").get_json()) == 1
+    assert client.get(f"/api/inbox?user={bob}").get_json() == []
+
+
+def test_capture_cannot_delete_someone_elses(client):
+    ana, bob = make_user(client, "Ana"), make_user(client, "Bob")
+    cid = capture(client, ana, "Severance").get_json()["id"]
+    assert client.delete(f"/api/inbox/{cid}?user={bob}").status_code == 404
+    assert len(client.get(f"/api/inbox?user={ana}").get_json()) == 1   # untouched
+
+
+def test_capture_validation(client):
+    uid = make_user(client, "Ana")
+    assert capture(client, uid, "   ").status_code == 400
+    assert capture(client, uid, "x" * 501).status_code == 400
+    assert capture(client, uid, "x" * 500).status_code == 201
+
+
+def test_capture_requires_user(client):
+    make_user(client, "Ana")
+    assert client.post("/api/inbox", json={"text": "Severance"}).status_code == 400
+    assert client.get("/api/inbox").status_code == 400
+
+
+def test_captures_die_with_the_profile(client):
+    uid = make_user(client, "Ana")
+    capture(client, uid, "Severance")
+    assert client.delete(f"/api/users/{uid}").status_code == 204
+    uid2 = make_user(client, "Ana")          # same name, new id
+    assert client.get(f"/api/inbox?user={uid2}").get_json() == []

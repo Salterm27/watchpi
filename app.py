@@ -119,6 +119,18 @@ CREATE TABLE IF NOT EXISTS suggestions (
     data      TEXT NOT NULL
 );
 
+-- Quick-capture inbox: raw text sent from outside the app ("add Severance").
+-- Deliberately UNRESOLVED — the Pi never looks titles up. The browser resolves
+-- each capture against TMDB next time the app is opened, so ambiguous names
+-- ("The Office") get a human choice instead of a server-side guess.
+CREATE TABLE IF NOT EXISTS inbox (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    text       TEXT    NOT NULL,
+    source     TEXT    NOT NULL DEFAULT 'api',
+    created_at TEXT    NOT NULL
+);
+
 -- Titles a user never wants suggested again ("not interested" ✕).
 CREATE TABLE IF NOT EXISTS suggestion_hides (
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -925,6 +937,71 @@ def mark_seen(user_id):
     db.execute("UPDATE users SET last_open_at=? WHERE id=?", (now(), user_id))
     db.commit()
     return jsonify(previous_open_at=prev)
+
+
+# ---------------------------------------------------------------- inbox
+# Quick-capture: something outside the app POSTs a raw title, the browser
+# resolves it later. Channel-agnostic on purpose — a phone shortcut today, a
+# chat bot tomorrow; both just send text.
+
+MAX_CAPTURE_LEN = 500
+
+
+def inbox_to_dict(row):
+    return {
+        "id": row["id"],
+        "text": row["text"],
+        "source": row["source"],
+        "created_at": row["created_at"],
+    }
+
+
+@app.get("/api/inbox")
+def list_inbox():
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    rows = get_db().execute(
+        "SELECT * FROM inbox WHERE user_id=? ORDER BY created_at DESC, id DESC", (user["id"],)
+    ).fetchall()
+    return jsonify([inbox_to_dict(r) for r in rows])
+
+
+@app.post("/api/inbox")
+def add_capture():
+    """Body: {"text": "Severance", "source": "telegram"} — unresolved on purpose."""
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", "")).strip()
+    if not text or len(text) > MAX_CAPTURE_LEN:
+        return jsonify(error=f"text is required and must be 1-{MAX_CAPTURE_LEN} chars"), 400
+    source = str(data.get("source", "api")).strip()[:40] or "api"
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO inbox (user_id, text, source, created_at) VALUES (?,?,?,?)",
+        (user["id"], text, source, now()),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM inbox WHERE id=?", (cur.lastrowid,)).fetchone()
+    return jsonify(inbox_to_dict(row)), 201
+
+
+@app.delete("/api/inbox/<int:capture_id>")
+def delete_capture(capture_id):
+    """Discard a capture — after it's been added to the library, or ignored."""
+    user = current_user()
+    if user is None:
+        return jsonify(error="valid ?user=<id> is required"), 400
+    db = get_db()
+    cur = db.execute(
+        "DELETE FROM inbox WHERE id=? AND user_id=?", (capture_id, user["id"])
+    )
+    db.commit()
+    if cur.rowcount == 0:
+        return jsonify(error="not found"), 404
+    return "", 204
 
 
 # ---------------------------------------------------------------- config

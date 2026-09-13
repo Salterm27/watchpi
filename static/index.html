@@ -308,6 +308,7 @@ function posterUrl(p, size) { return p.startsWith('http') ? p : IMG + size + p; 
 let tab = 'library';
 let library = [];            // items from the Pi
 let libIndex = {};           // `${media_type}:${tmdb_id}` -> item
+let INBOX = [];              // unresolved quick-captures awaiting a match
 let detailCache = {};        // tmdb detail responses (per session)
 let seasonCache = {};        // `${tmdbId}:${season}` -> episodes
 let FOLDERS = [];            // folders visible to the current user
@@ -391,6 +392,12 @@ async function loadLibrary() {
   library.forEach(i => libIndex[`${i.media_type}:${i.tmdb_id}`] = i);
 }
 
+/* quick-capture inbox: raw text sent from outside the app, resolved here */
+async function loadInbox() {
+  try { INBOX = USER ? await api(`/inbox?${userQ()}`) : []; }
+  catch { INBOX = []; }   // never block the library on this
+}
+
 /* first unwatched episode across seasons, or null if caught up */
 function computeNextUp(d, watchedSet) {
   const seasons = (d.seasons || []).filter(s => s.season_number > 0)
@@ -433,10 +440,20 @@ function showTab(t) {
 async function renderLibrary() {
   const main = document.getElementById('main');
   main.innerHTML = '<div class="spin">Loading…</div>';
-  try { await Promise.all([loadLibrary(), loadFolders()]); }
+  try { await Promise.all([loadLibrary(), loadFolders(), loadInbox()]); }
   catch { main.innerHTML = '<div class="empty">Can’t reach the Pi API.</div>'; return; }
 
   main.innerHTML = '';
+
+  /* quick-capture banner — titles sent from outside the app, awaiting a match */
+  if (INBOX.length) {
+    const n = INBOX.length;
+    const band = el(`<div class="newband">📥 <b>${n} captured title${n === 1 ? '' : 's'}</b>
+      — ${esc(INBOX.slice(0, 3).map(c => c.text).join(' · '))}${n > 3 ? ' …' : ''}
+      <span style="color:var(--muted)">(tap to sort)</span></div>`);
+    band.onclick = openInbox;
+    main.appendChild(band);
+  }
 
   /* new-episodes banner */
   if (NEW_EPISODES.length) {
@@ -646,6 +663,68 @@ async function enrichCard(item, card) {
         Math.min(100, Math.round(100 * item.watched_episodes / total)) + '%';
     }
   } catch { /* no key / offline — card keeps its basic label */ }
+}
+
+/* ============================================================ inbox
+   Captures arrive as raw text (the Pi never looks anything up). Resolving
+   them is a browser job: search TMDB for the text, you tap the right match. */
+async function openInbox() {
+  const bd = document.getElementById('sheet-backdrop');
+  const sheet = document.getElementById('sheet');
+  bd.classList.add('open');
+  sheet.innerHTML = `<div class="grabber"></div>
+    <h2 style="margin-bottom:4px">📥 Captured titles</h2>
+    <p class="hint" style="margin-bottom:16px">Sent from outside the app. Tap the right match to add it.</p>
+    <div id="inbox-list"></div>`;
+  sheet.prepend(closeBtn());
+  const list = sheet.querySelector('#inbox-list');
+
+  const done = async (cap, entry) => {
+    try { await api(`/inbox/${cap.id}?${userQ()}`, { method: 'DELETE' }); } catch {}
+    INBOX = INBOX.filter(c => c.id !== cap.id);
+    entry.remove();
+    if (!INBOX.length) { closeSheet(); renderLibrary(); }
+  };
+
+  for (const cap of INBOX) {
+    const entry = el(`<div class="field" style="margin-bottom:18px">
+      <label style="display:flex;align-items:center;gap:8px">
+        <span style="flex:1">${esc(cap.text)}</span>
+        <button class="btn" style="padding:4px 10px;font-size:12px">Discard</button>
+      </label>
+      <div class="inbox-results"><div class="spin">Searching…</div></div>
+    </div>`);
+    entry.querySelector('button').onclick = () => done(cap, entry);
+    list.appendChild(entry);
+
+    const box = entry.querySelector('.inbox-results');
+    try {
+      const d = await tmdb('/search/multi', { query: cap.text, include_adult: 'false' });
+      const hits = (d.results || [])
+        .filter(r => r.media_type === 'movie' || r.media_type === 'tv').slice(0, 6);
+      if (!hits.length) { box.innerHTML = '<div class="hint">No match on TMDB — discard, or search manually.</div>'; continue; }
+      box.innerHTML = '';
+      const grid = el('<div class="grid"></div>');
+      for (const r of hits) {
+        const card = searchCard(r.media_type, r.id, r.title || r.name, r.poster_path,
+          r.release_date || r.first_air_date);
+        card.onclick = async () => {        // add, then clear the capture
+          try {
+            await api(`/library?${userQ()}`, { method: 'POST', body: {
+              tmdb_id: r.id, media_type: r.media_type, title: r.title || r.name,
+              poster_path: r.poster_path } });
+            await loadLibrary();
+            toast(`Added “${r.title || r.name}”`);
+            done(cap, entry);
+          } catch { toast('Failed — is the Pi up?'); }
+        };
+        grid.appendChild(card);
+      }
+      box.appendChild(grid);
+    } catch {
+      box.innerHTML = '<div class="hint">TMDB unreachable — try again later.</div>';
+    }
+  }
 }
 
 /* ============================================================ tonight picker
