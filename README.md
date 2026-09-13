@@ -256,6 +256,27 @@ sends "Title https://…" — the link is stripped and the words kept. A *bare*
 link with no words is rejected, because resolving it would mean the Pi fetching
 pages, which is exactly what this design avoids.
 
+The bot can also read and update your watch progress:
+
+| Command | What it does |
+|---|---|
+| `Severance` | capture to your inbox |
+| `/watching` | series you're part-way through |
+| `/where severance` | the episode to watch **next** — `Severance — next S2E4 · 12 watched` |
+| `/watched severance s2e4` | mark that episode |
+| `/watched severance` | mark exactly the episode `/where` reported |
+| `/unwatch severance s2e4` | undo it |
+
+Titles are matched loosely, so `/where sever` and even `severence` work; an
+ambiguous name lists the candidates. Marks go through the normal API, so a
+title in a shared folder syncs to the other members and the reply says so.
+
+One honest limit: the bot never reads TMDB, so it can't see where a season
+ends. "Next" is the following episode **in the same season**, and `/watched`
+with no episode marks precisely that — the two always agree. If a season just
+ended, name the episode (`/watched severance s3e1`). Every write replies with
+exactly what changed, and `/unwatch` is the undo.
+
 ## New-episode alerts
 
 On open, the app records the visit and asks TMDB (browser-side, as always)
