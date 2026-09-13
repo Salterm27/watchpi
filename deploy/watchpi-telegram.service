@@ -1,0 +1,27 @@
+[Unit]
+Description=WatchPi Telegram capture bot (optional sidecar)
+Wants=network-online.target
+After=network-online.target watchpi.service
+
+[Service]
+Type=simple
+# change if your Pi username differs
+User=sebas
+WorkingDirectory=/srv/apps/watchpi
+# leading "-" = optional: an unconfigured Pi shouldn't fail the unit.
+# Holds WATCHPI_TELEGRAM_TOKEN / _CHATS — chmod 600, NOT config.json
+# (GET /api/config is unauthenticated).
+EnvironmentFile=-/etc/watchpi/telegram.env
+ExecStart=/srv/apps/watchpi/venv/bin/python /srv/apps/watchpi/telegram_bot.py
+Restart=always
+RestartSec=10
+
+# hardening (same shape as watchpi.service)
+NoNewPrivileges=true
+ProtectSystem=strict
+# only needs to persist the getUpdates offset
+ReadWritePaths=/srv/apps/watchpi/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

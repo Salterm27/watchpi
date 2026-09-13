@@ -36,9 +36,14 @@ runuser -u "$APPUSER" -- "$REPO/venv/bin/pip" install -q -r "$REPO/requirements.
 
 # refresh systemd units if the repo's copies changed
 cp "$REPO/deploy/watchpi.service" /etc/systemd/system/
+cp "$REPO/deploy/watchpi-telegram.service" /etc/systemd/system/
 chmod +x "$REPO/deploy/autodeploy.sh"   # web uploads drop the exec bit
 systemctl daemon-reload
 systemctl restart watchpi
+# optional sidecar: only if it's enabled, and NEVER gate the deploy on it —
+# a broken bot must not roll back a good app
+systemctl is-enabled --quiet watchpi-telegram 2>/dev/null && \
+  systemctl restart watchpi-telegram || true
 
 if healthy; then
   echo "deployed $(GIT log -1 --oneline)"
