@@ -361,6 +361,10 @@ function ago(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
+/* No metadata request may hang a view: a stalled source aborts and the UI
+   degrades to what did answer. */
+const FETCH_TIMEOUT = 8000;
+
 /* TMDB — supports both a v3 api key and a v4 read access token */
 async function tmdb(path, params = {}) {
   const url = new URL('https://api.themoviedb.org/3' + path);
@@ -370,7 +374,10 @@ async function tmdb(path, params = {}) {
   if (!key) throw new Error('no-key');
   if (key.length > 60) opts.headers['Authorization'] = 'Bearer ' + key; // v4 token
   else url.searchParams.set('api_key', key);                            // v3 key
-  const r = await fetch(url, opts);
+  let r;
+  try {
+    r = await fetch(url, { ...opts, signal: AbortSignal.timeout(FETCH_TIMEOUT) });
+  } catch { throw new Error('tmdb-timeout'); }   // never hang a view on a stalled request
   if (r.status === 401) throw new Error('bad-key');
   if (!r.ok) throw new Error('tmdb-' + r.status);
   return r.json();
@@ -382,7 +389,10 @@ async function rawg(path, params = {}) {
   const url = new URL('https://api.rawg.io/api' + path);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   url.searchParams.set('key', S.rawgKey);
-  const r = await fetch(url);
+  let r;
+  try {
+    r = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT) });
+  } catch { throw new Error('rawg-timeout'); }   // RAWG is the slower source — fail fast
   if (r.status === 401) throw new Error('bad-rawg-key');
   if (!r.ok) throw new Error('rawg-' + r.status);
   return r.json();
@@ -989,15 +999,20 @@ async function buildSuggestions(seeds, hash) {
     e.n += hits; e.rank += rankPts;
   };
 
+  /* track whether the sources actually answered — an all-failed build must not
+     overwrite a good batch with an empty one (that poisoned the cache) */
+  let ok = 0, failed = 0;
+
   /* movies & tv: TMDB per-title recommendations */
   await Promise.all(seeds.shows.map(async s => {
     try {
       const d = await tmdb(`/${s.media_type}/${s.tmdb_id}/recommendations`);
+      ok++;
       (d.results || []).slice(0, SUGGEST.perSeed).forEach((r, idx) => {
         const mt = r.media_type || s.media_type;
         if (mt === 'movie' || mt === 'tv') consider(r, mt, 1, SUGGEST.perSeed - idx);
       });
-    } catch { /* one failed seed shouldn't kill the build */ }
+    } catch { failed++; /* one failed seed shouldn't kill the build */ }
   }));
 
   /* games: RAWG free tier — same-series entries (strong signal, extra hit
@@ -1008,6 +1023,7 @@ async function buildSuggestions(seeds, hash) {
       rawg(`/games/${s.tmdb_id}`),
       rawg(`/games/${s.tmdb_id}/game-series`, { page_size: 6 }),
     ]);
+    for (const p of [detail, series]) p.status === 'fulfilled' ? ok++ : failed++;
     if (detail.status === 'fulfilled')
       for (const g of detail.value.genres || [])
         genreCount[g.slug] = (genreCount[g.slug] || 0) + 1;
@@ -1044,11 +1060,16 @@ async function buildSuggestions(seeds, hash) {
       item.platform_ids = (e.r.platforms || []).map(p => (p.platform || p).id);
     return item;
   });
+  /* every source failed (offline / throttled) — don't store an empty batch
+     over a good one, and don't mark it built so we retry later */
+  if (!ok && failed) throw new Error('suggest-build-failed');
   await api(`/suggestions?${userQ()}`, { method: 'PUT', body: { seed_hash: hash, items } });
   return { built_at: new Date().toISOString(), seed_hash: hash, items };
 }
 
 /* rebuild when there's no cache yet, or on/after Friday IF the seeds changed */
+let suggestBuild = null;   // in-flight build, shared by concurrent callers
+
 async function refreshSuggestions(force = false) {
   if (!USER || !S.key) return null;
   try { if (!library.length) await loadLibrary(); } catch { return null; }
@@ -1062,10 +1083,16 @@ async function refreshSuggestions(force = false) {
       HIDDEN = new Set(cache.hidden || []);
     } catch { return null; }
   }
-  const stale = !cache.items.length
+  /* An EMPTY batch is a legitimate result (everything already in the library
+     or dismissed) — not a missing cache. Keying staleness off items.length
+     made every visit rebuild, hammering TMDB/RAWG. */
+  const stale = !cache.built_at
     || (cache.seed_hash !== hash && new Date(cache.built_at) < lastFriday());
   if (force || stale) {
-    try { cache = await buildSuggestions(seeds, hash); } catch { /* keep the old batch */ }
+    /* one build at a time: tab switches and chip clicks used to each fire
+       their own full rebuild */
+    if (!suggestBuild) suggestBuild = buildSuggestions(seeds, hash).finally(() => { suggestBuild = null; });
+    try { cache = await suggestBuild; } catch { /* keep the old batch */ }
   }
   SUGGESTIONS = cache;
   return cache;
@@ -1185,49 +1212,79 @@ function searchCard(mediaType, id, title, poster, date, offPlatform = false) {
   return card;
 }
 
+/* bumped per search so a slow earlier response can't overwrite a newer one */
+let searchGen = 0;
+
 async function doSearch(query) {
   const box = document.getElementById('results');
   if (!query.trim()) { renderSuggestions(); return; }
+  const gen = ++searchGen;
+  const live = () => gen === searchGen && document.getElementById('results') === box;
   box.innerHTML = '<div class="spin">Searching…</div>';
 
-  /* movies & TV from TMDB, games from RAWG — honoring the type filter */
+  /* Movies & TV from TMDB, games from RAWG. The two sources render
+     INDEPENDENTLY — RAWG is much slower, and waiting for it used to block the
+     whole view on the All/Games filters. */
   const wantShows = searchType !== 'game';
   const wantGames = (searchType === 'all' || searchType === 'game') && S.rawgKey;
-  const [tmdbRes, rawgRes] = await Promise.allSettled([
-    wantShows ? tmdb('/search/multi', { query, include_adult: 'false' }) : Promise.reject(new Error('skipped')),
-    wantGames ? rawg('/games', { search: query, page_size: 12 }) : Promise.reject(new Error('skipped')),
-  ]);
-  if (tmdbRes.status === 'rejected' && rawgRes.status === 'rejected') {
-    if (searchType === 'game')
-      { box.innerHTML = '<div class="empty">Add a RAWG API key in ⚙ settings to search games.</div>'; return; }
-    return handleTmdbError(tmdbRes.reason, box);
-  }
+  const showsP = wantShows ? tmdb('/search/multi', { query, include_adult: 'false' }) : null;
+  const gamesP = wantGames ? rawg('/games', { search: query, page_size: 12 }) : null;
 
-  let shows = tmdbRes.status === 'fulfilled'
-    ? (tmdbRes.value.results || []).filter(r => r.media_type === 'movie' || r.media_type === 'tv')
-    : [];
-  if (searchType === 'movie' || searchType === 'tv')
-    shows = shows.filter(r => r.media_type === searchType);
-  const games = rawgRes.status === 'fulfilled' ? (rawgRes.value.results || []) : [];
-  if (!shows.length && !games.length) { box.innerHTML = '<div class="empty">No results.</div>'; return; }
+  /* sections are placed up front so each source can fill its own slot
+     whenever it answers, in a stable order */
+  const state = { shows: null, games: null, showsFailed: false, gamesFailed: false };
+  const paint = () => {
+    if (!live()) return;
+    const waiting = (showsP && state.shows === null && !state.showsFailed)
+      || (gamesP && state.games === null && !state.gamesFailed);
+    const shows = state.shows || [], games = state.games || [];
+    if (!shows.length && !games.length) {
+      box.innerHTML = waiting ? '<div class="spin">Searching…</div>'
+        : (state.showsFailed && searchType === 'game'
+            ? '<div class="empty">Add a RAWG API key in ⚙ settings to search games.</div>'
+            : '<div class="empty">No results.</div>');
+      return;
+    }
+    box.innerHTML = '';
+    const bothSections = shows.length && (games.length || (gamesP && !state.gamesFailed));
+    if (shows.length) {
+      if (bothSections) box.appendChild(el('<h3 class="section" style="margin-top:0">Movies &amp; TV</h3>'));
+      const grid = el('<div class="grid"></div>');
+      for (const r of shows)
+        grid.appendChild(searchCard(r.media_type, r.id, r.title || r.name, r.poster_path,
+          r.release_date || r.first_air_date));
+      box.appendChild(grid);
+    }
+    if (games.length) {
+      box.appendChild(el(`<h3 class="section" ${shows.length ? '' : 'style="margin-top:0"'}>Games</h3>`));
+      const grid = el('<div class="grid"></div>');
+      for (const g of games)
+        grid.appendChild(searchCard('game', g.id, g.name, g.background_image, g.released,
+          !onMyConsoles(g)));
+      box.appendChild(grid);
+    }
+    /* games still coming, or gave up — say so instead of blocking on them */
+    if (gamesP && state.games === null)
+      box.appendChild(el(state.gamesFailed
+        ? '<div class="prov-note">Games unavailable right now.</div>'
+        : '<div class="prov-note">Loading games…</div>'));
+  };
 
-  box.innerHTML = '';
-  if (shows.length) {
-    if (games.length) box.appendChild(el('<h3 class="section" style="margin-top:0">Movies &amp; TV</h3>'));
-    const grid = el('<div class="grid"></div>');
-    for (const r of shows)
-      grid.appendChild(searchCard(r.media_type, r.id, r.title || r.name, r.poster_path,
-        r.release_date || r.first_air_date));
-    box.appendChild(grid);
-  }
-  if (games.length) {
-    box.appendChild(el(`<h3 class="section" ${shows.length ? '' : 'style="margin-top:0"'}>Games</h3>`));
-    const grid = el('<div class="grid"></div>');
-    for (const g of games)
-      grid.appendChild(searchCard('game', g.id, g.name, g.background_image, g.released,
-        !onMyConsoles(g)));
-    box.appendChild(grid);
-  }
+  if (showsP) showsP.then(d => {
+    let shows = (d.results || []).filter(r => r.media_type === 'movie' || r.media_type === 'tv');
+    if (searchType === 'movie' || searchType === 'tv')
+      shows = shows.filter(r => r.media_type === searchType);
+    state.shows = shows;
+  }).catch(e => {
+    state.showsFailed = true;
+    if (live() && !state.games && (e.message === 'no-key' || e.message === 'bad-key')) handleTmdbError(e, box);
+  }).finally(paint);
+
+  if (gamesP) gamesP.then(d => { state.games = d.results || []; })
+    .catch(() => { state.gamesFailed = true; }).finally(paint);
+  if (!showsP && !gamesP)
+    box.innerHTML = '<div class="empty">Add a RAWG API key in ⚙ settings to search games.</div>';
+    box.innerHTML = '<div class="empty">Add a RAWG API key in ⚙ settings to search games.</div>';
 }
 
 function handleTmdbError(e, box) {
