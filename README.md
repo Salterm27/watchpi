@@ -4,9 +4,10 @@ A personal JustWatch-style tracker built for a Raspberry Pi 2.
 
 **Architecture:** the browser fetches all metadata (search, posters, streaming
 availability) directly from TMDB. The Pi only stores your personal state —
-each profile's library and watched episodes — in one SQLite file. The server
-never makes an outbound request, so it stays fast on 1GB of RAM and your backup
-is tiny.
+each profile's library and watched episodes — in one SQLite file. The web
+server never makes an outbound request, so it stays fast on 1GB of RAM and your
+backup is tiny. (The one exception is opt-in and deliberately isolated: the
+Telegram capture bot runs as a *separate* process — see Inbox.)
 
 ```
 Phone browser ──► TMDB API      (search, posters, "where to watch")
@@ -24,8 +25,10 @@ watchpi/
 ├── app.py                     # Flask backend (the only code on the Pi's hot path)
 ├── requirements.txt           # just flask
 ├── static/index.html          # entire frontend, single file
+├── telegram_bot.py            # optional capture sidecar (stdlib only)
 └── deploy/
     ├── watchpi.service        # systemd unit for the app
+    ├── watchpi-telegram.service # optional Telegram capture bot
     ├── backup.sh              # restic backup (all of /srv/apps, not just this app)
     ├── watchpi-backup.service # oneshot unit for backup.sh
     └── watchpi-backup.timer   # nightly 03:15
@@ -210,8 +213,48 @@ when you open the app, which also means ambiguous names ("The Office") get a
 human choice instead of a server-side guess.
 
 Captures are per profile. An iOS Shortcut or Android automation pointed at that
-endpoint works **today on the home network**; a send-from-anywhere channel
-(a chat bot the Pi polls, needing no open ports) is the planned follow-up.
+endpoint works on the home network — and the Telegram bot below fills the inbox
+from anywhere.
+
+### Telegram bot (capture from anywhere)
+
+Text a title to your own bot and it lands in your inbox. The Pi **dials out**
+and long-polls Telegram, so there are no open ports, no TLS and no remote
+access needed — it works on cellular, a friend's wifi, or behind CGNAT.
+
+It runs as a *separate* systemd service on purpose: the Flask app still never
+calls out, and a flaky poller can't take the app down.
+
+1. Message [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
+2. Create `/etc/watchpi/telegram.env` (**chmod 600** — the token must not go in
+   `config.json`, which `/api/config` serves unauthenticated):
+
+   ```bash
+   sudo install -d -m 700 /etc/watchpi
+   sudo tee /etc/watchpi/telegram.env >/dev/null <<'EOF'
+   WATCHPI_TELEGRAM_TOKEN=123456:ABC...
+   WATCHPI_TELEGRAM_CHATS=
+   EOF
+   sudo chmod 600 /etc/watchpi/telegram.env
+   ```
+
+3. Enable it, then message your bot `/whoami` — it replies with your chat id:
+
+   ```bash
+   sudo cp deploy/watchpi-telegram.service /etc/systemd/system/
+   sudo systemctl daemon-reload && sudo systemctl enable --now watchpi-telegram
+   journalctl -u watchpi-telegram -f      # watch it poll
+   ```
+
+4. Put `chat_id:profile_id` pairs in `WATCHPI_TELEGRAM_CHATS` (e.g.
+   `12345678:1,87654321:2`) and `sudo systemctl restart watchpi-telegram`.
+   **Unlisted chats are ignored** — that allowlist is what stops a stranger who
+   finds your bot from writing into your inbox.
+
+Send a title ("Severance") and it's captured. Sharing from another app usually
+sends "Title https://…" — the link is stripped and the words kept. A *bare*
+link with no words is rejected, because resolving it would mean the Pi fetching
+pages, which is exactly what this design avoids.
 
 ## New-episode alerts
 
