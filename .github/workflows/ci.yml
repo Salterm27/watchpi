@@ -22,6 +22,8 @@ jobs:
         run: |
           sed -n '/<script>/,/<\/script>/p' static/index.html | sed '1d;$d' > /tmp/app.js
           node --check /tmp/app.js
+      - name: Frontend unit tests
+        run: node --test tests/frontend.test.js
       - name: Deploy script syntax check
         run: bash -n deploy/autodeploy.sh
 
