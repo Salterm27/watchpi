@@ -1,0 +1,11 @@
+{
+  "name": "watchpi-tests",
+  "private": true,
+  "description": "Browser tests only — the app itself ships no JS dependencies.",
+  "scripts": {
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1"
+  }
+}
