@@ -539,3 +539,8 @@ def test_captures_die_with_the_profile(client):
     assert client.delete(f"/api/users/{uid}").status_code == 204
     uid2 = make_user(client, "Ana")          # same name, new id
     assert client.get(f"/api/inbox?user={uid2}").get_json() == []
+
+
+def test_health(client):
+    """The Pi's autodeploy gate polls this to decide whether to roll back."""
+    assert client.get("/api/health").get_json() == {"ok": True}

@@ -1166,7 +1166,16 @@ async function buildSuggestions(seeds, hash) {
   return { built_at: new Date().toISOString(), seed_hash: hash, items };
 }
 
-/* rebuild when there's no cache yet, or on/after Friday IF the seeds changed */
+/* Rebuild only when there's no cache at all, or the seeds changed and it's
+   on/after Friday. An EMPTY batch is a legitimate result (everything is
+   already in the library or dismissed) — keying this off items.length made
+   every single visit rebuild, hammering TMDB/RAWG. Kept as a named pure
+   function so that regression stays under test. */
+function suggestionsStale(cache, hash) {
+  if (!cache.built_at) return true;                    // never built
+  return cache.seed_hash !== hash && new Date(cache.built_at) < lastFriday();
+}
+
 let suggestBuild = null;   // in-flight build, shared by concurrent callers
 
 async function refreshSuggestions(force = false) {
@@ -1183,11 +1192,8 @@ async function refreshSuggestions(force = false) {
     } catch { return null; }
   }
   /* An EMPTY batch is a legitimate result (everything already in the library
-     or dismissed) — not a missing cache. Keying staleness off items.length
-     made every visit rebuild, hammering TMDB/RAWG. */
-  const stale = !cache.built_at
-    || (cache.seed_hash !== hash && new Date(cache.built_at) < lastFriday());
-  if (force || stale) {
+     or dismissed) — not a missing cache. */
+  if (force || suggestionsStale(cache, hash)) {
     /* one build at a time: tab switches and chip clicks used to each fire
        their own full rebuild */
     if (!suggestBuild) suggestBuild = buildSuggestions(seeds, hash).finally(() => { suggestBuild = null; });
