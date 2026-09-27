@@ -18,6 +18,20 @@ Phone browser ──► TMDB API      (search, posters, "where to watch")
 Streaming availability comes from TMDB's `watch/providers` endpoint, which is
 powered by JustWatch data.
 
+### Design decisions
+
+**No authentication, on purpose.** Profiles are a convenience, not a security
+boundary — anyone who can reach the Pi can tap any profile. Picking a name in
+one tap *is* the product on a shared TV or phone, and a login step would cost
+more in daily friction than it buys against the realistic threat (someone
+already on the home wifi).
+
+**So the LAN is the security boundary.** Don't expose WatchPi to the public
+internet: no port-forwarding, no Tailscale Funnel, no open reverse proxy. Note
+that `GET /api/config` returns the TMDB and RAWG keys to anyone who asks — that
+falls out of the browser-fetching-metadata design above, and is fine on a home
+network only.
+
 ## Files
 
 ```
