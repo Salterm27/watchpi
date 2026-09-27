@@ -5,3 +5,9 @@ __pycache__/
 nohup.out
 .DS_Store
 .pytest_cache/
+
+# playwright
+node_modules/
+.pw-tmp/
+test-results/
+playwright-report/
