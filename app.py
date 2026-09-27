@@ -9,6 +9,7 @@ browser directly from TMDB — this server never talks to the internet.
 Designed for a Raspberry Pi 2: Flask + SQLite, no other dependencies.
 """
 
+import functools
 import json
 import os
 import sqlite3
@@ -261,6 +262,19 @@ def current_user():
     return get_db().execute("SELECT * FROM users WHERE id=?", (int(uid),)).fetchone()
 
 
+def requires_user(view):
+    """Endpoints that act on one profile: resolves ?user=<id> and passes the
+    row in as `user`, or 400s. Nineteen handlers repeated this guard verbatim;
+    as a decorator it also can't be forgotten on a new endpoint."""
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        user = current_user()
+        if user is None:
+            return jsonify(error="valid ?user=<id> is required"), 400
+        return view(*args, user=user, **kwargs)
+    return wrapped
+
+
 def synced_user_ids(db, item_id, user_id):
     """Users whose progress on this item moves together with user_id's:
     everyone in shared folders that contain the item AND user_id belongs to.
@@ -365,10 +379,8 @@ def index():
 # ---------------------------------------------------------------- library
 
 @app.get("/api/library")
-def list_library():
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
+@requires_user
+def list_library(user):
     db = get_db()
     rows = db.execute(
         """SELECT i.*,
@@ -419,10 +431,8 @@ def list_library():
 
 
 @app.post("/api/library")
-def add_item():
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
+@requires_user
+def add_item(user):
     data = request.get_json(silent=True) or {}
     try:
         tmdb_id = int(data["tmdb_id"])
@@ -455,18 +465,21 @@ def add_item():
 
 
 @app.delete("/api/library/<int:item_id>")
-def delete_item(item_id):
+@requires_user
+def delete_item(item_id, user):
     """Remove the item from THIS user's library (?user=<id>): drop their
     ownership and personal progress. The shared catalog row is deleted only
     when no one owns it and no folder references it."""
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     db = get_db()
     if not db.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone():
         return jsonify(error="not found"), 404
-    for tbl in ("item_owners", "episodes", "movie_watches", "stopped"):
-        db.execute(f"DELETE FROM {tbl} WHERE item_id=? AND user_id=?", (item_id, user["id"]))
+    # spelled out rather than looped over a table name: no SQL anywhere in this
+    # codebase is built by string formatting, and a test enforces that
+    owned = (item_id, user["id"])
+    db.execute("DELETE FROM item_owners   WHERE item_id=? AND user_id=?", owned)
+    db.execute("DELETE FROM episodes      WHERE item_id=? AND user_id=?", owned)
+    db.execute("DELETE FROM movie_watches WHERE item_id=? AND user_id=?", owned)
+    db.execute("DELETE FROM stopped       WHERE item_id=? AND user_id=?", owned)
     orphan = (
         db.execute("SELECT 1 FROM item_owners WHERE item_id=?", (item_id,)).fetchone() is None
         and db.execute("SELECT 1 FROM folder_items WHERE item_id=?", (item_id,)).fetchone() is None
@@ -478,14 +491,12 @@ def delete_item(item_id):
 
 
 @app.patch("/api/library/<int:item_id>")
-def update_item(item_id):
+@requires_user
+def update_item(item_id, user):
     """Per-user flags. Requires ?user=<id>.
     Body: {"watched": bool} (movies, syncs in shared folders)
           and/or {"stopped": bool} (always personal — mutes alerts, greys out).
     """
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     data = request.get_json(silent=True) or {}
     if "watched" not in data and "stopped" not in data:
         return jsonify(error="watched (bool) and/or stopped (bool) is required"), 400
@@ -534,10 +545,8 @@ def update_item(item_id):
 # ---------------------------------------------------------------- episodes
 
 @app.get("/api/library/<int:item_id>/episodes")
-def list_episodes(item_id):
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
+@requires_user
+def list_episodes(item_id, user):
     db = get_db()
     if not db.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone():
         return jsonify(error="not found"), 404
@@ -550,14 +559,12 @@ def list_episodes(item_id):
 
 
 @app.put("/api/library/<int:item_id>/episodes")
-def set_episodes(item_id):
+@requires_user
+def set_episodes(item_id, user):
     """
     Toggle one or many episodes for the current user (?user=<id>).
     Body: {"episodes": [{"season":1,"episode":2}, ...], "watched": true}
     """
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     data = request.get_json(silent=True) or {}
     eps = data.get("episodes")
     watched = data.get("watched")
@@ -624,10 +631,8 @@ def user_is_member(db, folder_id, user_id):
 
 
 @app.get("/api/folders")
-def list_folders():
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
+@requires_user
+def list_folders(user):
     db = get_db()
     rows = db.execute(
         """SELECT f.* FROM folders f
@@ -641,12 +646,10 @@ def list_folders():
 
 
 @app.post("/api/folders")
-def add_folder():
+@requires_user
+def add_folder(user):
     """Body: {"name", "member_ids": [user ids to share with]} — the creator is
     always a member. Legacy {"shared": true} still means share with everyone."""
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", "")).strip()
     if not name or len(name) > 40:
@@ -678,12 +681,10 @@ def add_folder():
 
 
 @app.put("/api/folders/<int:folder_id>/members")
-def set_folder_members(folder_id):
+@requires_user
+def set_folder_members(folder_id, user):
     """Body: {"member_ids": [...]}. Any member can edit. New members' progress
     on the folder's titles is set to the acting user's (the shared position)."""
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     data = request.get_json(silent=True) or {}
     member_ids = data.get("member_ids")
     if not isinstance(member_ids, list) or not member_ids \
@@ -718,10 +719,8 @@ def set_folder_members(folder_id):
 
 
 @app.delete("/api/folders/<int:folder_id>")
-def delete_folder(folder_id):
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
+@requires_user
+def delete_folder(folder_id, user):
     db = get_db()
     row = db.execute("SELECT * FROM folders WHERE id=?", (folder_id,)).fetchone()
     if not row:
@@ -734,13 +733,11 @@ def delete_folder(folder_id):
 
 
 @app.put("/api/folders/<int:folder_id>/items")
-def set_folder_item(folder_id):
+@requires_user
+def set_folder_item(folder_id, user):
     """Body: {"item_id": N, "member": true|false}. Adding to a shared folder
     copies the adding user's progress to every member (the shared position)
     and logs a feed event; removing logs one too but leaves progress as-is."""
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     data = request.get_json(silent=True) or {}
     item_id = data.get("item_id")
     member = data.get("member")
@@ -784,12 +781,10 @@ def set_folder_item(folder_id):
 # ---------------------------------------------------------------- feed
 
 @app.get("/api/feed")
-def feed():
+@requires_user
+def feed(user):
     """Recent watch activity by OTHER users, newest first. Episode marks are
     grouped per user+show+season+day."""
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     db = get_db()
     events = []
     ep_rows = db.execute(
@@ -839,10 +834,8 @@ def feed():
 # ---------------------------------------------------------------- suggestions
 
 @app.get("/api/suggestions")
-def get_suggestions():
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
+@requires_user
+def get_suggestions(user):
     db = get_db()
     hidden = [
         f"{r['media_type']}:{r['tmdb_id']}" for r in db.execute(
@@ -862,11 +855,9 @@ def get_suggestions():
 
 
 @app.put("/api/suggestions/hide")
-def set_suggestion_hide():
+@requires_user
+def set_suggestion_hide(user):
     """Body: {"media_type", "tmdb_id", "hidden": bool} — 'not interested' flag."""
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     data = request.get_json(silent=True) or {}
     media_type = data.get("media_type")
     tmdb_id = data.get("tmdb_id")
@@ -890,11 +881,9 @@ def set_suggestion_hide():
 
 
 @app.delete("/api/suggestions/hide")
-def clear_suggestion_hides():
+@requires_user
+def clear_suggestion_hides(user):
     """Reset the user's whole 'not interested' list."""
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     db = get_db()
     db.execute("DELETE FROM suggestion_hides WHERE user_id=?", (user["id"],))
     db.commit()
@@ -902,11 +891,9 @@ def clear_suggestion_hides():
 
 
 @app.put("/api/suggestions")
-def put_suggestions():
+@requires_user
+def put_suggestions(user):
     """Body: {"seed_hash": str, "items": [...]} — browser-built, stored per user."""
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     data = request.get_json(silent=True) or {}
     seed_hash = str(data.get("seed_hash", ""))
     items = data.get("items")
@@ -957,10 +944,8 @@ def inbox_to_dict(row):
 
 
 @app.get("/api/inbox")
-def list_inbox():
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
+@requires_user
+def list_inbox(user):
     rows = get_db().execute(
         "SELECT * FROM inbox WHERE user_id=? ORDER BY created_at DESC, id DESC", (user["id"],)
     ).fetchall()
@@ -968,11 +953,9 @@ def list_inbox():
 
 
 @app.post("/api/inbox")
-def add_capture():
+@requires_user
+def add_capture(user):
     """Body: {"text": "Severance", "source": "telegram"} — unresolved on purpose."""
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     data = request.get_json(silent=True) or {}
     text = str(data.get("text", "")).strip()
     if not text or len(text) > MAX_CAPTURE_LEN:
@@ -989,11 +972,9 @@ def add_capture():
 
 
 @app.delete("/api/inbox/<int:capture_id>")
-def delete_capture(capture_id):
+@requires_user
+def delete_capture(capture_id, user):
     """Discard a capture — after it's been added to the library, or ignored."""
-    user = current_user()
-    if user is None:
-        return jsonify(error="valid ?user=<id> is required"), 400
     db = get_db()
     cur = db.execute(
         "DELETE FROM inbox WHERE id=? AND user_id=?", (capture_id, user["id"])

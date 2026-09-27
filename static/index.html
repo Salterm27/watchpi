@@ -596,23 +596,38 @@ async function renderLibrary() {
     paintGroups(groupArea, visible, fresh);
 }
 
+/* The one place card markup is built. Three call sites used to assemble this
+   near-identically, so every change (the cinema flag, most recently) meant
+   three near-identical edits. Callers add their own badges and buttons.
+   It is also the single place the title/sub escaping discipline has to hold. */
+function mediaCard({ mediaType, tmdbId, title, poster, sub = '',
+                     watched = false, paused = false, progress = false }) {
+  const card = el(`<div class="card ${paused ? 'paused' : ''}">
+    ${poster
+      ? `<img loading="lazy" src="${posterUrl(poster, 'w185')}" alt="">`
+      : `<div class="noposter">${esc(title)}</div>`}
+    <div class="title">${esc(title)}</div>
+    ${progress ? '<div class="progressbar" style="display:none"><div></div></div>' : ''}
+    <div class="sub">${esc(sub)}</div>
+  </div>`);
+  // something you've already watched doesn't need telling it's in cinemas
+  if (!watched && inCinemas(mediaType, tmdbId))
+    card.appendChild(el('<span class="cinema">🎬 In cinemas</span>'));
+  card.onclick = () => openDetail(mediaType, tmdbId, title);
+  return card;
+}
+
 /* build one library card (poster, badges, sub-label, click, async enrich) */
 function libraryCard(item) {
-  const card = el(`<div class="card ${item.stopped ? 'paused' : ''}">
-    ${item.poster_path
-      ? `<img loading="lazy" src="${posterUrl(item.poster_path, 'w185')}" alt="">`
-      : `<div class="noposter">${esc(item.title)}</div>`}
-    <div class="title">${esc(item.title)}</div>
-    <div class="progressbar" style="display:none"><div></div></div>
-    <div class="sub"></div>
-  </div>`);
+  const card = mediaCard({
+    mediaType: item.media_type, tmdbId: item.tmdb_id, title: item.title,
+    poster: item.poster_path, watched: item.watched, paused: item.stopped,
+    progress: item.media_type === 'tv',
+  });
   const sub = card.querySelector('.sub');
   if (item.media_type === 'movie') {
     if (item.watched) card.prepend(el('<span class="badge done">✓ seen</span>'));
     else card.prepend(el('<span class="badge">Movie</span>'));   // uniform with TV/Game
-    // already seen it? the cinema flag is just noise
-    if (!item.watched && inCinemas('movie', item.tmdb_id))
-      card.appendChild(el('<span class="cinema">🎬 In cinemas</span>'));
     sub.textContent = 'Movie';
   } else if (item.media_type === 'game') {
     if (item.watched) card.prepend(el('<span class="badge done">✓ finished</span>'));
@@ -627,8 +642,7 @@ function libraryCard(item) {
     card.prepend(el('<span class="badge">TV</span>'));
     enrichCard(item, card);   // async: next-up + progress once TMDB answers
   }
-  card.onclick = () => openDetail(item.media_type, item.tmdb_id, item.title);
-  return card;
+  return card;                // click + cinema flag come from mediaCard
 }
 function fillGrid(grid, items) { for (const i of items) grid.appendChild(libraryCard(i)); }
 
@@ -1232,17 +1246,12 @@ async function renderSuggestions() {
   const addGrid = list => {
     const grid = el('<div class="grid"></div>');
     for (const r of list) {
-      const card = el(`<div class="card">
-        ${r.poster_path
-          ? `<img loading="lazy" src="${posterUrl(r.poster_path, 'w185')}" alt="">`
-          : `<div class="noposter">${esc(r.title)}</div>`}
-        <span class="badge">${r.media_type}</span>
-        ${inCinemas(r.media_type, r.tmdb_id) ? '<span class="cinema">🎬 In cinemas</span>' : ''}
-        <button class="dismiss" title="Not interested">✕</button>
-        <div class="title">${esc(r.title)}</div>
-        <div class="sub">${year(r.date)}</div>
-      </div>`);
-      card.onclick = () => openDetail(r.media_type, r.tmdb_id, r.title);
+      const card = mediaCard({
+        mediaType: r.media_type, tmdbId: r.tmdb_id, title: r.title,
+        poster: r.poster_path, sub: year(r.date),
+      });
+      card.prepend(el(`<span class="badge">${esc(r.media_type)}</span>`));
+      card.appendChild(el('<button class="dismiss" title="Not interested">✕</button>'));
       card.querySelector('.dismiss').onclick = async ev => {
         ev.stopPropagation();
         const key = `${r.media_type}:${r.tmdb_id}`;
@@ -1303,16 +1312,10 @@ function renderSearch() {
 
 function searchCard(mediaType, id, title, poster, date) {
   const inLib = libIndex[`${mediaType}:${id}`];
-  const card = el(`<div class="card">
-    ${poster
-      ? `<img loading="lazy" src="${posterUrl(poster, 'w185')}" alt="">`
-      : `<div class="noposter">${esc(title)}</div>`}
-    ${inLib ? '<span class="badge done">✓ added</span>' : `<span class="badge">${mediaType}</span>`}
-    ${inCinemas(mediaType, id) ? '<span class="cinema">🎬 In cinemas</span>' : ''}
-    <div class="title">${esc(title)}</div>
-    <div class="sub">${year(date)}</div>
-  </div>`);
-  card.onclick = () => openDetail(mediaType, id, title);
+  const card = mediaCard({ mediaType, tmdbId: id, title, poster, sub: year(date) });
+  card.prepend(el(inLib
+    ? '<span class="badge done">✓ added</span>'
+    : `<span class="badge">${esc(mediaType)}</span>`));
   return card;
 }
 
