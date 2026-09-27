@@ -277,6 +277,23 @@ with no episode marks precisely that — the two always agree. If a season just
 ended, name the episode (`/watched severance s3e1`). Every write replies with
 exactly what changed, and `/unwatch` is the undo.
 
+## In cinemas
+
+Movies showing in cinemas right now get a **🎬 In cinemas** flag on their
+poster — in the library, in search results, in suggestions, and as a line in
+the detail sheet. Cinema runs are short, so it's there to catch the film you
+added months ago and forgot about.
+
+It follows the **region** in ⚙ Settings — the same setting that drives "where
+to watch" — and comes from TMDB's `now_playing`, fetched once and cached on
+your device for a day rather than looked up per title. Films you've already
+marked watched aren't flagged; neither are series or games.
+
+Two honest limits: TMDB's data is **country-level**, so the flag means "on
+general release in your country", not "showing at a cinema near you". And only
+the first few pages of listings are fetched (popularity-ordered), so a very
+small limited release may not be flagged.
+
 ## New-episode alerts
 
 On open, the app records the visit and asks TMDB (browser-side, as always)

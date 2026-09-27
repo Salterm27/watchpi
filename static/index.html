@@ -89,6 +89,12 @@
   }
   .badge.done { color: var(--green); }
   .badge.paused { color: var(--muted); }
+  /* "in cinemas" overlay — sits under the badge slot, clear of .dismiss */
+  .card .cinema {
+    position: absolute; top: 28px; left: 6px; background: rgba(0,0,0,.8);
+    color: var(--accent); font-size: 10px; font-weight: 700; padding: 2px 7px;
+    border-radius: 20px; text-transform: uppercase; pointer-events: none;
+  }
   .card .dismiss {
     position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,.75);
     color: var(--muted); border: none; width: 26px; height: 26px; border-radius: 50%;
@@ -321,6 +327,50 @@ try { libGroups = { ...libGroups, ...JSON.parse(localStorage.getItem('watchpi_li
 let caughtUpCache = {};      // tmdbId -> {watched, caughtUp} — instant grouping on repeat opens
 try { caughtUpCache = JSON.parse(localStorage.getItem('watchpi_caughtup') || '{}'); } catch {}
 
+/* Films currently in cinemas for S.region. ONE cached set for the whole app —
+   never a per-card lookup. Hydrated synchronously so repeat opens flag
+   instantly, then refreshed in the background; null = not known yet, which
+   simply means no flags. */
+const CINEMA_TTL = 24 * 3600 * 1000;   // listings change weekly at most
+const CINEMA_PAGES = 3;                // ~60 titles, popularity-ordered
+let NOW_PLAYING = null;
+let nowPlayingAt = 0, nowPlayingRegion = null, nowPlayingFetch = null;
+try {
+  const c = JSON.parse(localStorage.getItem('watchpi_now_playing') || 'null');
+  if (c && Array.isArray(c.ids)) {
+    NOW_PLAYING = new Set(c.ids); nowPlayingAt = c.at || 0; nowPlayingRegion = c.region;
+  }
+} catch {}
+
+function inCinemas(mediaType, tmdbId) {
+  return mediaType === 'movie' && !!NOW_PLAYING && NOW_PLAYING.has(tmdbId);
+}
+
+/* refresh when stale or the region changed; one shared in-flight request */
+function refreshNowPlaying() {
+  if (!S.key) return null;
+  const fresh = NOW_PLAYING && nowPlayingRegion === S.region
+    && (Date.now() - nowPlayingAt) < CINEMA_TTL;
+  if (fresh || nowPlayingFetch) return nowPlayingFetch;
+  nowPlayingFetch = (async () => {
+    const ids = [];
+    for (let page = 1; page <= CINEMA_PAGES; page++) {
+      const d = await tmdb('/movie/now_playing', { region: S.region, page });
+      (d.results || []).forEach(r => ids.push(r.id));
+      if (page >= (d.total_pages || 1)) break;
+    }
+    NOW_PLAYING = new Set(ids);
+    nowPlayingAt = Date.now();
+    nowPlayingRegion = S.region;
+    try {
+      localStorage.setItem('watchpi_now_playing',
+        JSON.stringify({ region: S.region, at: nowPlayingAt, ids }));
+    } catch {}
+  })().catch(() => { /* offline / no key — just no flags */ })
+     .finally(() => { nowPlayingFetch = null; });
+  return nowPlayingFetch;
+}
+
 /* ============================================================ helpers */
 function el(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
 function esc(s) { return (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -440,6 +490,7 @@ function showTab(t) {
 async function renderLibrary() {
   const main = document.getElementById('main');
   main.innerHTML = '<div class="spin">Loading…</div>';
+  refreshNowPlaying();   // background; cards flag from the cached set meanwhile
   try { await Promise.all([loadLibrary(), loadFolders(), loadInbox()]); }
   catch { main.innerHTML = '<div class="empty">Can’t reach the Pi API.</div>'; return; }
 
@@ -558,6 +609,10 @@ function libraryCard(item) {
   const sub = card.querySelector('.sub');
   if (item.media_type === 'movie') {
     if (item.watched) card.prepend(el('<span class="badge done">✓ seen</span>'));
+    else card.prepend(el('<span class="badge">Movie</span>'));   // uniform with TV/Game
+    // already seen it? the cinema flag is just noise
+    if (!item.watched && inCinemas('movie', item.tmdb_id))
+      card.appendChild(el('<span class="cinema">🎬 In cinemas</span>'));
     sub.textContent = 'Movie';
   } else if (item.media_type === 'game') {
     if (item.watched) card.prepend(el('<span class="badge done">✓ finished</span>'));
@@ -1176,6 +1231,7 @@ async function renderSuggestions() {
           ? `<img loading="lazy" src="${posterUrl(r.poster_path, 'w185')}" alt="">`
           : `<div class="noposter">${esc(r.title)}</div>`}
         <span class="badge">${r.media_type}</span>
+        ${inCinemas(r.media_type, r.tmdb_id) ? '<span class="cinema">🎬 In cinemas</span>' : ''}
         <button class="dismiss" title="Not interested">✕</button>
         <div class="title">${esc(r.title)}</div>
         <div class="sub">${year(r.date)}</div>
@@ -1246,6 +1302,7 @@ function searchCard(mediaType, id, title, poster, date) {
       ? `<img loading="lazy" src="${posterUrl(poster, 'w185')}" alt="">`
       : `<div class="noposter">${esc(title)}</div>`}
     ${inLib ? '<span class="badge done">✓ added</span>' : `<span class="badge">${mediaType}</span>`}
+    ${inCinemas(mediaType, id) ? '<span class="cinema">🎬 In cinemas</span>' : ''}
     <div class="title">${esc(title)}</div>
     <div class="sub">${year(date)}</div>
   </div>`);
@@ -1563,6 +1620,12 @@ function renderDetail(sheet, mediaType, d, fallbackTitle) {
     return;
   }
 
+  /* in cinemas right now (movies only) — before "where to watch", since it's
+     the more time-sensitive answer */
+  if (inCinemas(mediaType, d.id))
+    sheet.appendChild(el('<div class="prov-note" style="color:var(--accent)">'
+      + `🎬 In cinemas now in ${esc(S.region)}.</div>`));
+
   /* streaming availability */
   const provWrap = el('<div></div>');
   provWrap.appendChild(el(`<h3 class="section">Where to watch (${esc(S.region)})</h3>`));
@@ -1786,10 +1849,11 @@ function openSettings() {
       Saved on the Pi — shared by every device on your network.</div>
     </div>
     <div class="field">
-      <label>Region for streaming availability</label>
+      <label>Region — streaming &amp; cinemas</label>
       <input id="set-region" type="text" maxlength="2" value="${esc(S.region)}"
              style="text-transform:uppercase" placeholder="US">
-      <div class="hint">Two-letter country code, e.g. US, AR, ES, DE.</div>
+      <div class="hint">Two-letter country code, e.g. US, AR, ES, DE. Sets both
+      "where to watch" and which films are flagged as in cinemas.</div>
     </div>
     <div class="field">
       <label>RAWG API key (optional — for video games)</label>
@@ -1814,6 +1878,7 @@ function openSettings() {
       }});
       S.key = cfg.tmdb_key; S.region = cfg.region; S.rawgKey = cfg.rawg_key || '';
       detailCache = {}; // region affects providers
+      refreshNowPlaying();   // …and which films are in cinemas
       closeSheet();
       toast('Saved to the Pi');
       if (!USER) setTimeout(() => openProfilePicker(false), 300);
