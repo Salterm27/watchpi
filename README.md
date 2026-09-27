@@ -26,6 +26,7 @@ watchpi/
 ├── requirements.txt           # just flask
 ├── static/index.html          # entire frontend, single file
 ├── telegram_bot.py            # optional capture sidecar (stdlib only)
+├── tests/                     # pytest: API, bot logic, bot<->API end-to-end
 └── deploy/
     ├── watchpi.service        # systemd unit for the app
     ├── watchpi-telegram.service # optional Telegram capture bot
