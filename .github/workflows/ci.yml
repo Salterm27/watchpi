@@ -31,7 +31,7 @@ jobs:
   # things unit tests structurally cannot reach. Separate job so a slow
   # browser run doesn't hold up the fast feedback from `test`.
   browser:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
