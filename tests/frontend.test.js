@@ -194,6 +194,85 @@ describe('inCinemas', () => {
   });
 });
 
+/* ------------------------------------------------ escaping discipline
+   The browser suite proves hostile input renders as text through the paths it
+   exercises. This catches a missing esc() on a path no test covers yet, and
+   is deliberately narrow — only data-bearing fields, so it stays free of
+   false positives rather than needing an ever-growing allowlist. */
+describe('HTML templates escape untrusted fields', () => {
+  const html = fs.readFileSync(
+    path.join(__dirname, '..', 'static', 'index.html'), 'utf8');
+
+  // fields that carry text from TMDB/RAWG, the API or the user
+  const RISKY = /\b(title|name|text|query|overview|fallbackTitle)\b/;
+
+  /**
+   * Template literals that actually become DOM — the argument to el(), and
+   * anything assigned to .innerHTML. Scanning only these is what keeps the
+   * check precise: confirm()/toast() strings are plain text and a tag-shaped
+   * regex over the whole file flags them (and any prose containing the word
+   * "title") for nothing.
+   */
+  function domTemplates(src) {
+    const out = [];
+    const starts = [...src.matchAll(/(?:\bel\s*\(|\.innerHTML\s*=\s*)`/g)];
+    for (const s of starts) {
+      let i = s.index + s[0].length;      // first char inside the backtick
+      const from = i;
+      let depth = 0;                      // ${ } nesting, which may hold `…`
+      for (; i < src.length; i++) {
+        const c = src[i];
+        if (c === '\\') { i++; continue; }
+        if (c === '$' && src[i + 1] === '{') { depth++; i++; continue; }
+        if (c === '}' && depth) { depth--; continue; }
+        if (c === '`' && !depth) break;   // closing backtick of this template
+      }
+      out.push({ body: src.slice(from, i), offset: from });
+    }
+    return out;
+  }
+
+  test('no unescaped interpolation of a data-bearing field', () => {
+    const offenders = [];
+    for (const tpl of domTemplates(html)) {
+      for (const m of tpl.body.matchAll(/\$\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g)) {
+        // test the code, not the prose: a constant like 'open a title and
+        // add it' contains the word but carries no user data
+        const expr = m[1];
+        const code = expr.replace(/'[^']*'|"[^"]*"/g, "''");
+        if (!RISKY.test(code)) continue;
+        if (/\besc\s*\(/.test(code)) continue;             // escaped: fine
+        if (/^\s*userQ\(\)\s*$/.test(code)) continue;      // a query string, not markup
+        const line = html.slice(0, tpl.offset + m.index).split('\n').length;
+        offenders.push(`index.html:${line}  \${${expr.trim()}}`);
+      }
+    }
+    assert.deepEqual(offenders, [],
+      'interpolate user/remote text into HTML only via esc():\n  '
+      + offenders.join('\n  '));
+  });
+
+  test('the scan actually looks at the markup', () => {
+    // a broken scanner that finds nothing would pass the test above silently
+    const tpls = domTemplates(html);
+    assert.ok(tpls.length > 25, `only found ${tpls.length} DOM templates`);
+    assert.ok(tpls.some(t => t.body.includes('class="card')), 'missed the card markup');
+  });
+
+  test('it would catch a missing esc()', () => {
+    const bad = 'el(`<div class="title">${item.title}</div>`)';
+    const found = domTemplates(bad)
+      .flatMap(t => [...t.body.matchAll(/\$\{([^{}]+)\}/g)])
+      .filter(m => RISKY.test(m[1]) && !/\besc\s*\(/.test(m[1]));
+    assert.equal(found.length, 1, 'the scanner must flag an unescaped title');
+  });
+
+  test('esc() actually neutralises the dangerous characters', () => {
+    const out = app.esc('<img src=x onerror="a">&\'');
+    for (const ch of ['<', '>', '"']) assert.ok(!out.includes(ch), `esc left a raw ${ch}`);
+  });
+});
+
 /* ------------------------------------------------ misc helpers */
 describe('helpers', () => {
   test('seedHashOf is stable for the same seeds and changes with them', () => {
