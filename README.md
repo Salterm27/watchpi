@@ -83,7 +83,9 @@ sudo systemctl enable --now watchpi-backup.timer
 sudo systemctl start watchpi-backup.service   # test run now
 ```
 
-It snapshots each SQLite db with `sqlite3 .backup` (consistent copies), uploads
+It snapshots each SQLite db in `/srv/apps/*/data/` with `sqlite3 .backup` to
+`<name>.db.bak` (consistent copies; the live `*.db`/`-wal`/`-shm` files are
+excluded), uploads
 only changed chunks, keeps 7 daily / 4 weekly / 6 monthly snapshots, and pings
 healthchecks.io if configured. Keep the restic passphrase somewhere off the Pi
 — without it backups are unrecoverable.
@@ -94,6 +96,28 @@ Restore drill:
 source /etc/watchpi/restic.env
 restic snapshots
 restic restore latest --target /tmp/restore-test
+ls /tmp/restore-test/srv/apps/*/data/      # expect <name>.db.bak per db
+sqlite3 /tmp/restore-test/srv/apps/watchpi/data/watchpi.db.bak "PRAGMA integrity_check"
+```
+
+To actually restore an app, stop it, then copy the snapshot back over the live
+db (dropping stale WAL/SHM files):
+
+```bash
+sudo systemctl stop watchpi
+cp /tmp/restore-test/srv/apps/watchpi/data/watchpi.db.bak /srv/apps/watchpi/data/watchpi.db
+rm -f /srv/apps/watchpi/data/watchpi.db-wal /srv/apps/watchpi/data/watchpi.db-shm
+sudo systemctl start watchpi
+```
+
+Older versions of the script wrote snapshots as `<name>.bak.db`, which the
+`*.db` exclude silently dropped, and re-snapshotted them into `*.bak.bak.db`
+on every run. Those files are useless; remove them once on the Pi after
+deploying the new script:
+
+```bash
+ls /srv/apps/*/data/*.bak.db                # review first
+rm -f /srv/apps/*/data/*.bak.db             # also matches *.bak.bak.db
 ```
 
 ## Profiles

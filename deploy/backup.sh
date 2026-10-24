@@ -16,13 +16,18 @@
 set -euo pipefail
 source /etc/watchpi/restic.env
 
-# 1. Consistent SQLite snapshots (never back up a live db file directly)
+# 1. Consistent SQLite snapshots (never back up a live db file directly).
+#    Snapshots are named <name>.db.bak: they must NOT end in .db, or the
+#    *.db exclude below would drop them too (and this glob would re-snapshot
+#    them). Skip *.bak.db leftovers from the old naming scheme.
 for db in /srv/apps/*/data/*.db; do
     [ -e "$db" ] || continue
-    sqlite3 "$db" ".backup '${db%.db}.bak.db'"
+    case "$db" in *.bak.db) continue ;; esac
+    sqlite3 "$db" ".backup '${db}.bak'"
 done
 
-# 2. Incremental encrypted upload (backs up the .bak.db snapshots + everything else)
+# 2. Incremental encrypted upload: the *.db.bak snapshots + everything else,
+#    minus the live db files (and their WAL/SHM sidecars)
 restic backup /srv/apps \
     --exclude="/srv/apps/*/venv" \
     --exclude="*.pyc" --exclude="__pycache__" \
