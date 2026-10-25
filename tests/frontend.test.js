@@ -36,7 +36,7 @@ function fakeEl() {
 function loadApp() {
   const html = fs.readFileSync(
     path.join(__dirname, '..', 'static', 'index.html'), 'utf8');
-  const m = html.match(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/i);
+  const m = html.match(/<script\b[^>]*>([\s\S]*?)<\/script(?:\s+[^>]*)?>/i);
   assert.ok(m, 'could not find the <script> block in index.html');
 
   const cut = m[1].indexOf(BOOT_MARKER);
