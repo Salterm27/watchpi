@@ -97,6 +97,9 @@ sudo systemctl enable --now watchpi-backup.timer
 sudo systemctl start watchpi-backup.service   # test run now
 ```
 
+After this first install, auto-deploy (below) keeps `/srv/apps/backup.sh` and
+the backup units in sync with the repo on every deploy.
+
 It snapshots each SQLite db in `/srv/apps/*/data/` with `sqlite3 .backup` to
 `<name>.db.bak` (consistent copies; the live `*.db`/`-wal`/`-shm` files are
 excluded), uploads
@@ -104,14 +107,27 @@ only changed chunks, keeps 7 daily / 4 weekly / 6 monthly snapshots, and pings
 healthchecks.io if configured. Keep the restic passphrase somewhere off the Pi
 — without it backups are unrecoverable.
 
-Restore drill:
+Failure alerts (recommended — without them a broken backup goes unnoticed):
+create a free check at [healthchecks.io](https://healthchecks.io) with
+period **1 day** and grace **1 hour**, then add its ping URL to the env file:
 
 ```bash
-source /etc/watchpi/restic.env
-restic snapshots
-restic restore latest --target /tmp/restore-test
-ls /tmp/restore-test/srv/apps/*/data/      # expect <name>.db.bak per db
-sqlite3 /tmp/restore-test/srv/apps/watchpi/data/watchpi.db.bak "PRAGMA integrity_check"
+echo 'export HEALTHCHECK_URL="https://hc-ping.com/<uuid>"' | sudo tee -a /etc/watchpi/restic.env
+sudo systemctl start watchpi-backup.service   # check turns green
+```
+
+A successful run pings the URL; a failed run pings `<url>/fail` so you get
+emailed immediately; a run that never happens (Pi off, timer broken) alerts
+once the grace period runs out.
+
+Restore drill (everything as root: the env file is root-only, and restored
+files keep root ownership):
+
+```bash
+sudo bash -c 'source /etc/watchpi/restic.env && restic snapshots && restic restore latest --target /tmp/restore-test'
+sudo ls /tmp/restore-test/srv/apps/*/data/      # expect <name>.db.bak per db
+sudo sqlite3 /tmp/restore-test/srv/apps/watchpi/data/watchpi.db.bak "PRAGMA integrity_check"   # expect: ok
+sudo rm -rf /tmp/restore-test                   # when done
 ```
 
 To actually restore an app, stop it, then copy the snapshot back over the live
@@ -119,8 +135,9 @@ db (dropping stale WAL/SHM files):
 
 ```bash
 sudo systemctl stop watchpi
-cp /tmp/restore-test/srv/apps/watchpi/data/watchpi.db.bak /srv/apps/watchpi/data/watchpi.db
-rm -f /srv/apps/watchpi/data/watchpi.db-wal /srv/apps/watchpi/data/watchpi.db-shm
+sudo install -o sebas -g sebas -m 644 \
+    /tmp/restore-test/srv/apps/watchpi/data/watchpi.db.bak /srv/apps/watchpi/data/watchpi.db
+sudo rm -f /srv/apps/watchpi/data/watchpi.db-wal /srv/apps/watchpi/data/watchpi.db-shm
 sudo systemctl start watchpi
 ```
 
@@ -131,7 +148,7 @@ deploying the new script:
 
 ```bash
 ls /srv/apps/*/data/*.bak.db                # review first
-rm -f /srv/apps/*/data/*.bak.db             # also matches *.bak.bak.db
+sudo rm -f /srv/apps/*/data/*.bak.db            # also matches *.bak.bak.db
 ```
 
 ## Profiles

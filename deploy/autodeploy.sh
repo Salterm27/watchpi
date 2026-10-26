@@ -37,6 +37,10 @@ runuser -u "$APPUSER" -- "$REPO/venv/bin/pip" install -q -r "$REPO/requirements.
 # refresh systemd units if the repo's copies changed
 cp "$REPO/deploy/watchpi.service" /etc/systemd/system/
 cp "$REPO/deploy/watchpi-telegram.service" /etc/systemd/system/
+# backup script + units live outside the repo; a stale copy once kept
+# re-snapshotting its own snapshots for months, so always refresh them
+install -m 755 "$REPO/deploy/backup.sh" /srv/apps/backup.sh
+cp "$REPO/deploy/watchpi-backup.service" "$REPO/deploy/watchpi-backup.timer" /etc/systemd/system/
 chmod +x "$REPO/deploy/autodeploy.sh"   # web uploads drop the exec bit
 systemctl daemon-reload
 systemctl restart watchpi
