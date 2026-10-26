@@ -16,6 +16,10 @@
 set -euo pipefail
 source /etc/watchpi/restic.env
 
+# On any failure, tell healthchecks.io right away instead of waiting for
+# the missed success ping to time out
+trap '[ -n "${HEALTHCHECK_URL:-}" ] && curl -fsS --retry 3 "$HEALTHCHECK_URL/fail" > /dev/null' ERR
+
 # 1. Consistent SQLite snapshots (never back up a live db file directly).
 #    Snapshots are named <name>.db.bak: they must NOT end in .db, or the
 #    *.db exclude below would drop them too (and this glob would re-snapshot
