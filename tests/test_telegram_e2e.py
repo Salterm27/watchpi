@@ -28,8 +28,9 @@ CHAT = 111
 
 
 class _StubTelegram(BaseHTTPRequestHandler):
-    """Accepts sendMessage and records the text; getUpdates is never used here."""
+    """Records what the bot sent back; getUpdates is never used here."""
     replies = None
+    calls = None
 
     def log_message(self, *a):
         pass
@@ -37,7 +38,9 @@ class _StubTelegram(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
         params = {k: v[0] for k, v in parse_qs(body).items()}
-        if self.path.endswith("/sendMessage"):
+        method = self.path.rsplit("/", 1)[-1]
+        type(self).calls.append((method, params))
+        if method in ("sendMessage", "editMessageText"):
             type(self).replies.append(params.get("text", ""))
         payload = json.dumps({"ok": True}).encode()
         self.send_response(200)
@@ -48,15 +51,34 @@ class _StubTelegram(BaseHTTPRequestHandler):
 
 
 class Harness:
-    def __init__(self, client, replies):
+    def __init__(self, client, replies, calls):
         self.client = client        # seed/inspect the app directly (same DB)
         self.replies = replies
+        self.calls = calls
 
     def say(self, text, chats):
         """Put a message through the bot exactly as the poll loop would."""
         self.replies.clear()
         bot.handle({"update_id": 1, "message": {"chat": {"id": CHAT}, "text": text}}, chats)
         return "\n".join(self.replies)
+
+    def tap(self, data, chats):
+        """Tap an inline button, as the poll loop would deliver it."""
+        self.replies.clear()
+        self.calls.clear()
+        bot.handle({"update_id": 2, "callback_query": {
+            "id": "q", "data": data,
+            "message": {"message_id": 42, "chat": {"id": CHAT}}}}, chats)
+        return "\n".join(self.replies)
+
+    def buttons(self):
+        """callback_data of every button in the last message sent/edited."""
+        for method, params in reversed(self.calls):
+            if method in ("sendMessage", "editMessageText"):
+                markup = json.loads(params.get("reply_markup") or "{}")
+                return [b["callback_data"] for row in markup.get("inline_keyboard", [])
+                        for b in row]
+        return []
 
 
 @pytest.fixture()
@@ -69,8 +91,9 @@ def live(monkeypatch):
     app_srv = make_server("127.0.0.1", 0, watchpi.app)
     threading.Thread(target=app_srv.serve_forever, daemon=True).start()
 
-    replies = []
+    replies, calls = [], []
     _StubTelegram.replies = replies
+    _StubTelegram.calls = calls
     tg_srv = HTTPServer(("127.0.0.1", 0), _StubTelegram)
     threading.Thread(target=tg_srv.serve_forever, daemon=True).start()
 
@@ -79,7 +102,7 @@ def live(monkeypatch):
     monkeypatch.setattr(bot, "TG_API", f"http://127.0.0.1:{tg_srv.server_port}")
 
     with watchpi.app.test_client() as c:
-        yield Harness(c, replies)
+        yield Harness(c, replies, calls)
 
     app_srv.shutdown()
     tg_srv.shutdown()
@@ -175,3 +198,59 @@ def test_shared_folder_mark_syncs_and_says_so(live):
     reply = live.say("/watched severance s1e2", {CHAT: ana})
     assert "synced" in reply
     assert library(live, bob)["Severance"]["watched_episodes"] == 2
+
+
+# ---------------------------------------------------------------- tonight
+
+def seed_folder(h, uid, name, item_ids, member_ids=()):
+    f = h.client.post(f"/api/folders?user={uid}",
+                      json={"name": name, "member_ids": list(member_ids)}).get_json()
+    for i in item_ids:
+        h.client.put(f"/api/folders/{f['id']}/items?user={uid}",
+                     json={"item_id": i, "member": True})
+    return f["id"]
+
+
+def test_tonight_offers_folders_then_picks_from_the_chosen_one(live):
+    ana, bob = seed_user(live, "Ana"), seed_user(live, "Bob")
+    sev = seed_show(live, ana, episodes=[(1, 1)])
+    seed_show(live, ana, title="Andor", tmdb_id=83867, episodes=[(1, 1), (1, 2)])
+    fid = seed_folder(live, ana, "Us two", [sev], member_ids=[bob])
+
+    reply = live.say("/tonight", {CHAT: ana})
+    assert "Pick a folder" in reply
+    assert live.buttons() == ["tn:all:0", f"tn:{fid}:0"]
+
+    reply = live.tap(f"tn:{fid}:0", {CHAT: ana})
+    assert "Severance" in reply and "Andor" not in reply
+    assert "Next up S1E2" in reply and "Us two" in reply
+    assert ("answerCallbackQuery", {"callback_query_id": "q"}) in [
+        (m, {k: v for k, v in p.items() if k != "text"}) for m, p in live.calls]
+
+
+def test_tonight_by_name_and_reroll(live):
+    ana = seed_user(live)
+    a = seed_show(live, ana, episodes=[(1, 1)])
+    b = seed_show(live, ana, title="Andor", tmdb_id=83867, episodes=[(2, 1)])
+    fid = seed_folder(live, ana, "Sci-fi", [a, b])
+
+    first = live.say("/tonight sci", {CHAT: ana})
+    assert first.startswith("🌙 Tonight:")
+    assert live.buttons() == [f"tn:{fid}:1"]
+    second = live.tap(f"tn:{fid}:1", {CHAT: ana})
+    assert second != first and "enjoy" in second      # only two candidates
+    assert live.buttons() == []
+
+
+def test_tonight_cannot_read_someone_elses_folder(live):
+    ana, bob = seed_user(live, "Ana"), seed_user(live, "Bob")
+    sev = seed_show(live, bob)
+    bobs = seed_folder(live, bob, "Private", [sev])
+    reply = live.tap(f"tn:{bobs}:0", {CHAT: ana})
+    assert "Severance" not in reply
+
+
+def test_tonight_unlinked_chat_gets_nothing(live):
+    ana = seed_user(live)
+    seed_show(live, ana)
+    assert "Severance" not in live.tap("tn:all:0", {})

@@ -317,6 +317,8 @@ The bot can also read and update your watch progress:
 | Command | What it does |
 |---|---|
 | `Severance` | capture to your inbox |
+| `/tonight` | "what should I watch?" — tap a folder, get **one** pick |
+| `/tonight us two` | same, straight from that folder (matched loosely) |
 | `/watching` | series you're part-way through |
 | `/where severance` | the episode to watch **next** — `Severance — next S2E4 · 12 watched` |
 | `/watched severance s2e4` | mark that episode |
@@ -326,6 +328,16 @@ The bot can also read and update your watch progress:
 Titles are matched loosely, so `/where sever` and even `severence` work; an
 ambiguous name lists the candidates. Marks go through the normal API, so a
 title in a shared folder syncs to the other members and the reply says so.
+
+`/tonight` is the Telegram take on the 🌙 Tonight tab. It replies with a
+button per folder you belong to (🔒 private, 👥 shared) plus 📚 Everything;
+tap one and you get a single card — `🌙 Tonight: Severance · Next up S2E4 ·
+from 👥 Us two`. **🎲 Something else** rerolls in place, capped at 3 like the
+app. Picks come from that folder only: shows you're mid-binge on first
+(freshest first), then unwatched movies (newest added first), then shows you
+haven't started. Games, stopped titles and watched movies are never offered.
+Unlike the app it has no runtime filter and can't skip caught-up shows —
+both need TMDB, which the bot doesn't call.
 
 One honest limit: the bot never reads TMDB, so it can't see where a season
 ends. "Next" is the following episode **in the same season**, and `/watched`
