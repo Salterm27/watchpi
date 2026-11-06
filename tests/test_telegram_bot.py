@@ -207,3 +207,67 @@ def test_library_commands_require_a_linked_chat():
 
 def test_plain_text_still_captures():
     assert bot.decide(111, "Severance", CHATS) == ("capture", "Severance")
+
+
+# ---------------------------------------------------------------- tonight
+
+def item(title, media_type="tv", **kw):
+    return {"title": title, "media_type": media_type, **kw}
+
+
+def test_tonight_routes_with_and_without_folder():
+    assert bot.decide(111, "/tonight", CHATS) == ("tonight", "")
+    assert bot.decide(111, "/tonight us two", CHATS) == ("tonight", "us two")
+    assert bot.decide(999, "/tonight", CHATS)[0] == "reply"      # unlinked
+
+
+def test_tonight_ranks_binges_then_movies_then_unstarted():
+    items = [
+        item("Unstarted", added_at="2026-10-01"),
+        item("Old movie", "movie", added_at="2026-01-01"),
+        item("New movie", "movie", added_at="2026-09-01"),
+        item("Stale binge", watched_episodes=3, last_watched_at="2026-01-01"),
+        item("Hot binge", watched_episodes=1, last_watched_at="2026-11-01"),
+    ]
+    assert [i["title"] for i in bot.tonight_candidates(items)] == [
+        "Hot binge", "Stale binge", "New movie", "Old movie", "Unstarted"]
+
+
+def test_tonight_never_offers_games_stopped_or_watched_movies():
+    items = [item("Game", "game"), item("Quit", stopped=True),
+             item("Seen", "movie", watched=True), item("Ok", "movie")]
+    assert [i["title"] for i in bot.tonight_candidates(items)] == ["Ok"]
+
+
+def test_tonight_filters_by_folder():
+    items = [item("In", folders=[7]), item("Out", folders=[8]), item("None")]
+    assert [i["title"] for i in bot.tonight_candidates(items, 7)] == ["In"]
+    assert len(bot.tonight_candidates(items, None)) == 3
+
+
+def test_tonight_reroll_button_is_capped():
+    assert bot.tonight_keyboard(7, 0, 10)["inline_keyboard"][0][0]["callback_data"] == "tn:7:1"
+    assert "(3)" in bot.tonight_keyboard("all", 0, 10)["inline_keyboard"][0][0]["text"]
+    assert bot.tonight_keyboard(7, bot.TONIGHT_REROLLS, 10) is None     # out of rerolls
+    assert bot.tonight_keyboard(7, 1, 2) is None                        # out of candidates
+
+
+def test_parse_tonight_data_rejects_junk():
+    assert bot.parse_tonight_data("tn:all:0") == (None, 0)
+    assert bot.parse_tonight_data("tn:7:2") == (7, 2)
+    for bad in ("", "tn:7", "tn:x:1", "tn:7:-1", "zz:7:1", "tn:7:99"):
+        assert bot.parse_tonight_data(bad) is None
+
+
+def test_match_folder_is_loose():
+    folders = [{"id": 1, "name": "Us two", "shared": True}, {"id": 2, "name": "Horror"}]
+    assert bot.match_folder("us", folders)[0]["id"] == 1
+    assert bot.match_folder("horor", folders)[0]["id"] == 2
+    assert bot.match_folder("anime", folders) == (None, [])
+
+
+def test_callback_of():
+    upd = {"callback_query": {"id": "q1", "data": "tn:all:0",
+                              "message": {"message_id": 5, "chat": {"id": 111}}}}
+    assert bot.callback_of(upd) == (111, 5, "q1", "tn:all:0")
+    assert bot.callback_of(msg(111, "hi")) is None

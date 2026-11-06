@@ -50,6 +50,8 @@ URL_RE = re.compile(r"https?://\S+")
 HELP = (
     "Send me a title and I'll drop it in your WatchPi inbox — "
     "open the app and tap the right match to add it. e.g. Severance\n\n"
+    "/tonight — pick ONE thing to watch (choose a folder)\n"
+    "/tonight <folder> — same, straight from that folder\n"
     "/watching — what you're part-way through\n"
     "/where <title> — the episode to watch next\n"
     "/watched <title> [s2e4] — mark an episode watched\n"
@@ -59,6 +61,9 @@ HELP = (
     "I don't read TMDB, so I can't see where a season ends — if yours just "
     "did, name the episode (s3e1). I'll always say what I marked."
 )
+
+ALLOWED_UPDATES = json.dumps(["message", "edited_message", "callback_query"])
+TONIGHT_REROLLS = 3      # same cap as the app's Tonight tab
 
 # s2e4 / S02E04 / s2 e4 / 2x4
 EPISODE_RE = re.compile(r"\bs\s*(\d{1,3})\s*e\s*(\d{1,3})\b|\b(\d{1,3})\s*x\s*(\d{1,3})\b", re.I)
@@ -164,6 +169,95 @@ def format_progress(item):
     return f"{title} — next S{s}E{e} · {n} watched{flag}"
 
 
+def folder_label(folder):
+    return f"{'👥' if folder.get('shared') else '🔒'} {folder.get('name', '?')}"
+
+
+def match_folder(query, folders):
+    """match_title over folder names -> (folder, candidates)."""
+    by_title = [dict(f, title=f.get("name", "")) for f in folders]
+    hit, cands = match_title(query, by_title)
+    strip = lambda f: {k: v for k, v in f.items() if k != "title"}   # noqa: E731
+    return (strip(hit) if hit else None), [strip(c) for c in cands]
+
+
+def tonight_candidates(items, folder_id=None):
+    """Ranked picks for /tonight — the bot's take on the app's Tonight tab.
+    folder_id None = the whole library. Games, stopped titles and watched
+    movies are never offered. Order: shows you're mid-binge on (freshest
+    first), then unwatched movies (newest added first), then shows you
+    haven't started. Deterministic, so a reroll is just 'the next index'.
+
+    Without TMDB the bot can't tell a caught-up show from one with more to
+    watch — same honest limit as /where."""
+    pool = [i for i in items
+            if i.get("media_type") in ("tv", "movie") and not i.get("stopped")
+            and not (i.get("media_type") == "movie" and i.get("watched"))
+            and (folder_id is None or folder_id in (i.get("folders") or []))]
+
+    def rank(i):
+        if i.get("media_type") == "tv" and (i.get("watched_episodes") or 0) > 0:
+            return (0, i.get("last_watched_at") or "")
+        if i.get("media_type") == "movie":
+            return (1, i.get("added_at") or "")
+        return (2, i.get("added_at") or "")
+
+    pool.sort(key=lambda i: rank(i)[1], reverse=True)     # newest first…
+    pool.sort(key=lambda i: rank(i)[0])                   # …within each tier (stable)
+    return pool
+
+
+def format_tonight(item, scope_label):
+    if item.get("media_type") == "movie":
+        line = "Movie · not watched yet"
+    else:
+        s, e = next_up(item)
+        n = item.get("watched_episodes") or 0
+        line = f"Next up S{s}E{e}" + (f" · {n} watched" if n else " · not started")
+    return f"🌙 Tonight: {item.get('title', '?')}\n{line}\nfrom {scope_label}"
+
+
+def tonight_keyboard(scope, idx, total):
+    """Reroll button while rerolls (and candidates) remain, else none."""
+    left = TONIGHT_REROLLS - idx
+    if left > 0 and idx < total - 1:
+        return {"inline_keyboard": [[{"text": f"🎲 Something else ({left})",
+                                      "callback_data": f"tn:{scope}:{idx + 1}"}]]}
+    return None
+
+
+def folder_keyboard(folders):
+    rows = [[{"text": "📚 Everything", "callback_data": "tn:all:0"}]]
+    rows += [[{"text": folder_label(f), "callback_data": f"tn:{f['id']}:0"}] for f in folders]
+    return {"inline_keyboard": rows}
+
+
+def parse_tonight_data(data):
+    """'tn:all:0' / 'tn:7:2' -> (folder_id|None, idx), or None if malformed.
+    callback_data comes from the client, so it's validated, never trusted."""
+    parts = (data or "").split(":")
+    if len(parts) != 3 or parts[0] != "tn" or not parts[2].isdigit():
+        return None
+    idx = int(parts[2])
+    if idx > TONIGHT_REROLLS:
+        return None
+    if parts[1] == "all":
+        return None, idx
+    if parts[1].isdigit():
+        return int(parts[1]), idx
+    return None
+
+
+def callback_of(update):
+    """(chat_id, message_id, query_id, data) for inline-button taps, else None."""
+    cq = update.get("callback_query") or {}
+    msg = cq.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    if not cq.get("id") or chat_id is None:
+        return None
+    return int(chat_id), msg.get("message_id"), cq["id"], cq.get("data") or ""
+
+
 def message_of(update):
     """(chat_id, text) for updates we handle, else None."""
     msg = update.get("message") or update.get("edited_message") or {}
@@ -177,7 +271,7 @@ def message_of(update):
 def decide(chat_id, text, chats):
     """Parse a message into an intent. PURE — all IO happens in handle().
 
-    ('reply', str) | ('capture', title) | ('watching', None)
+    ('reply', str) | ('capture', title) | ('watching', None) | ('tonight', folder query)
     | ('progress', query) | ('mark', {query, episode, watched})
     """
     if text.startswith("/"):
@@ -196,6 +290,8 @@ def decide(chat_id, text, chats):
 
         if cmd in ("watching", "list"):
             return "watching", None
+        if cmd in ("tonight", "pick"):
+            return "tonight", arg
         if cmd in ("where", "status", "progress"):
             if not arg:
                 return "reply", "Which one? e.g. /where severance"
@@ -235,11 +331,32 @@ def tg(method, **params):
         return json.load(r)
 
 
-def send(chat_id, text):
+def send(chat_id, text, markup=None):
+    params = {"chat_id": chat_id, "text": text}
+    if markup:
+        params["reply_markup"] = json.dumps(markup)
     try:
-        tg("sendMessage", chat_id=chat_id, text=text)
+        tg("sendMessage", **params)
     except Exception as e:          # a failed reply must never kill the loop
         log(f"reply to {chat_id} failed: {e}")
+
+
+def edit(chat_id, message_id, text, markup=None):
+    """Rewrite a message in place — rerolls replace the card, not pile up."""
+    params = {"chat_id": chat_id, "message_id": message_id, "text": text,
+              "reply_markup": json.dumps(markup or {"inline_keyboard": []})}
+    try:
+        tg("editMessageText", **params)
+    except Exception as e:
+        log(f"edit in {chat_id} failed: {e}")
+
+
+def answer_callback(query_id, text=""):
+    """Stops the button's loading spinner. Telegram requires it."""
+    try:
+        tg("answerCallbackQuery", callback_query_id=query_id, text=text)
+    except Exception as e:
+        log(f"answerCallbackQuery failed: {e}")
 
 
 def post_capture(user_id, title):
@@ -254,6 +371,12 @@ def post_capture(user_id, title):
 
 def get_library(user_id):
     req = urllib.request.Request(f"{API}/api/library?user={user_id}&include=episodes")
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.load(r)
+
+
+def get_folders(user_id):
+    req = urllib.request.Request(f"{API}/api/folders?user={user_id}")
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.load(r)
 
@@ -319,6 +442,62 @@ def do_watching(chat_id, user_id):
     send(chat_id, "\n".join(format_progress(i) for i in items[:8]))
 
 
+def tonight_pick(user_id, folder_id, idx):
+    """(text, markup) for pick #idx from a folder (None = everything)."""
+    if folder_id is None:
+        label = "your whole library"
+    else:
+        folder = next((f for f in get_folders(user_id) if f["id"] == folder_id), None)
+        if folder is None:            # deleted, or not one of yours
+            return "That folder's gone — try /tonight again.", None
+        label = folder_label(folder)
+    picks = tonight_candidates(get_library(user_id), folder_id)
+    if not picks:
+        return (f"🌙 Nothing in {label} fits — no unwatched movies or "
+                "unfinished shows. Add something in the app."), None
+    idx = min(idx, len(picks) - 1)
+    text = format_tonight(picks[idx], label)
+    markup = tonight_keyboard("all" if folder_id is None else folder_id, idx, len(picks))
+    if markup is None and idx > 0:
+        text += "\n\nThat's the one — enjoy 🍿"
+    return text, markup
+
+
+def do_tonight(chat_id, user_id, query):
+    folders = get_folders(user_id)
+    if query:
+        folder, candidates = match_folder(query, folders)
+        if not folder:
+            if candidates:
+                return send(chat_id, "Which folder?", folder_keyboard(candidates[:8]))
+            return send(chat_id, f"No folder called “{query}”. Pick one:",
+                        folder_keyboard(folders))
+        return send(chat_id, *tonight_pick(user_id, folder["id"], 0))
+    if not folders:                   # nothing to choose between
+        return send(chat_id, *tonight_pick(user_id, None, 0))
+    send(chat_id, "🌙 Who's watching? Pick a folder:", folder_keyboard(folders))
+
+
+def handle_callback(cb, chats):
+    chat_id, message_id, query_id, data = cb
+    if chat_id not in chats:          # same allowlist as messages
+        answer_callback(query_id, "This chat isn't linked.")
+        return
+    parsed = parse_tonight_data(data)
+    if parsed is None:
+        answer_callback(query_id)
+        return
+    folder_id, idx = parsed
+    try:
+        text, markup = tonight_pick(chats[chat_id], folder_id, idx)
+    except Exception as e:
+        log(f"tonight failed: {e}")
+        answer_callback(query_id, "Couldn't reach WatchPi just now.")
+        return
+    answer_callback(query_id)
+    edit(chat_id, message_id, text, markup)
+
+
 def do_mark(chat_id, user_id, intent):
     item, err = resolve(user_id, intent["query"])
     if err:
@@ -346,6 +525,10 @@ def do_mark(chat_id, user_id, intent):
 
 
 def handle(update, chats):
+    cb = callback_of(update)
+    if cb:
+        handle_callback(cb, chats)
+        return
     parsed = message_of(update)
     if not parsed:
         return
@@ -360,6 +543,8 @@ def handle(update, chats):
             do_capture(chat_id, user_id, payload)
         elif kind == "watching":
             do_watching(chat_id, user_id)
+        elif kind == "tonight":
+            do_tonight(chat_id, user_id, payload)
         elif kind == "progress":
             item, err = resolve(user_id, payload)
             send(chat_id, err or format_progress(item))
@@ -383,7 +568,10 @@ def main():
     backoff = 1
     while True:
         try:
-            resp = tg("getUpdates", offset=offset, timeout=POLL_TIMEOUT)
+            # explicit, because Telegram remembers the last allowed_updates
+            # sent — without callback_query the /tonight buttons go dead
+            resp = tg("getUpdates", offset=offset, timeout=POLL_TIMEOUT,
+                      allowed_updates=ALLOWED_UPDATES)
             backoff = 1
         except urllib.error.HTTPError as e:
             if e.code == 409:
