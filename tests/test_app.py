@@ -565,3 +565,25 @@ def test_seasons_cache_roundtrip_and_validation(client):
         assert client.put(f"/api/library/{tv}/seasons", json=bad).status_code == 400
     assert client.put(f"/api/library/{mv}/seasons", json=ok).status_code == 400
     assert client.put("/api/library/9999/seasons", json=ok).status_code == 404
+
+
+def test_seasons_cache_prunes_episodes_that_dont_exist(client):
+    """1899 has one season of 8; the old bot marked S1E9 and S1E10."""
+    ana = client.post("/api/users", json={"name": "Ana"}).get_json()["id"]
+    bob = client.post("/api/users", json={"name": "Bob"}).get_json()["id"]
+    tv = client.post(f"/api/library?user={ana}",
+                     json={"tmdb_id": 90669, "media_type": "tv", "title": "1899"}).get_json()["id"]
+    client.post(f"/api/library?user={bob}",
+                json={"tmdb_id": 90669, "media_type": "tv", "title": "1899"})
+    for uid in (ana, bob):
+        client.put(f"/api/library/{tv}/episodes?user={uid}", json={"watched": True, "episodes": [
+            {"season": 1, "episode": e} for e in range(1, 11)] + [{"season": 2, "episode": 1}]})
+
+    r = client.put(f"/api/library/{tv}/seasons", json={"seasons": [[1, 8]], "last_aired": [1, 8]})
+    assert r.get_json()["pruned"] == 4                     # E9 + E10, for both profiles
+    for uid in (ana, bob):
+        eps = client.get(f"/api/library/{tv}/episodes?user={uid}").get_json()
+        got = {(e["season"], e["episode"]) for e in eps}
+        assert (1, 9) not in got and (1, 10) not in got
+        assert (1, 8) in got
+        assert (2, 1) in got        # season 2 isn't in the shape, so it's left alone

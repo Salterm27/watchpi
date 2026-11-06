@@ -488,7 +488,13 @@ function rememberSeasons(item, d) {
   if (fresh && JSON.stringify([cur.seasons, cur.last_aired]) ===
                JSON.stringify([shape.seasons, shape.last_aired])) return;
   item.seasons = { ...shape, updated_at: new Date().toISOString() };
-  api(`/library/${item.id}/seasons`, { method: 'PUT', body: shape }).catch(() => {});
+  api(`/library/${item.id}/seasons`, { method: 'PUT', body: shape }).then(res => {
+    if (!res || !res.pruned) return;
+    /* the Pi dropped marks on episodes that don't exist — mirror it locally */
+    const count = Object.fromEntries(shape.seasons);
+    item.episodes = (item.episodes || []).filter(([s, e]) => !(s in count) || (e >= 1 && e <= count[s]));
+    item.watched_episodes = item.episodes.length;
+  }).catch(() => {});
 }
 async function loadFolders() {
   FOLDERS = USER ? await api(`/folders?${userQ()}`) : [];

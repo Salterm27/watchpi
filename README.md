@@ -344,9 +344,10 @@ sheet, Tonight) it saves that show's shape — episodes per season and the last
 aired episode — on the Pi (`PUT /api/library/:id/seasons`). With that, "next"
 crosses season boundaries properly, a finished show reads **caught up ✓** and
 is never offered by `/tonight`, and `/watched` refuses episodes that don't
-exist or haven't aired (`1899 season 1 has 8 episodes — there's no E9`). If
-an older bot marked phantom episodes, `/where` lists them with the `/unwatch`
-to clear them.
+exist or haven't aired (`1899 season 1 has 8 episodes — there's no E9`).
+Saving a shape also deletes watch marks on episodes it says don't exist (an
+older bot could record S1E9 of an 8-episode season), for every profile; a
+season the shape doesn't list yet is left alone.
 
 A show you've never opened in the app has no shape yet, so the bot falls back
 to guessing "last + 1 in the same season" and says it's a guess. Opening the

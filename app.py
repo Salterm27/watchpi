@@ -591,8 +591,16 @@ def set_seasons(item_id):
              last_aired=excluded.last_aired, updated_at=excluded.updated_at""",
         (item_id, json.dumps(sorted(seasons)), json.dumps(last) if last else None, now()),
     )
+    # Clean up watch marks on episodes that don't exist (e.g. S1E9 of an
+    # 8-episode season, recorded by the bot before it knew season lengths).
+    # Only seasons the shape covers are touched: a season missing from it
+    # (TMDB hasn't listed it yet) keeps whatever was marked.
+    pruned = db.executemany(
+        "DELETE FROM episodes WHERE item_id=? AND season=? AND (episode < 1 OR episode > ?)",
+        [(item_id, s, n) for s, n in seasons],
+    ).rowcount
     db.commit()
-    return jsonify(ok=True)
+    return jsonify(ok=True, pruned=pruned)
 
 
 # ---------------------------------------------------------------- episodes
