@@ -254,3 +254,20 @@ def test_tonight_unlinked_chat_gets_nothing(live):
     ana = seed_user(live)
     seed_show(live, ana)
     assert "Severance" not in live.tap("tn:all:0", {})
+
+
+# ---------------------------------------------------------------- season shape
+
+def test_bot_uses_the_season_shape_the_app_cached(live):
+    uid = seed_user(live)
+    item = seed_show(live, uid, title="1899", tmdb_id=90669,
+                     episodes=[(1, e) for e in range(1, 9)])
+    assert "next S1E9" in live.say("/where 1899", {CHAT: uid})        # no shape yet: guess
+    r = live.client.put(f"/api/library/{item}/seasons",
+                        json={"seasons": [[1, 8]], "last_aired": [1, 8]})
+    assert r.status_code == 200
+    assert "caught up" in live.say("/where 1899", {CHAT: uid})
+    assert "8 episodes" in live.say("/watched 1899 s1e9", {CHAT: uid})
+    assert "caught up" in live.say("/watched 1899", {CHAT: uid})
+    assert library(live, uid)["1899"]["watched_episodes"] == 8         # nothing written
+    assert "1899" not in live.say("/tonight", {CHAT: uid})

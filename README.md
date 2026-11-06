@@ -336,13 +336,21 @@ from 👥 Us two`. **🎲 Something else** rerolls in place, capped at 3 like th
 app. Picks come from that folder only: shows you're mid-binge on first
 (freshest first), then unwatched movies (newest added first), then shows you
 haven't started. Games, stopped titles and watched movies are never offered.
-Unlike the app it has no runtime filter and can't skip caught-up shows —
-both need TMDB, which the bot doesn't call.
+Unlike the app it has no runtime filter (that needs TMDB at pick time).
 
-One honest limit: the bot never reads TMDB, so it can't see where a season
-ends. "Next" is the following episode **in the same season**, and `/watched`
-with no episode marks precisely that — the two always agree. If a season just
-ended, name the episode (`/watched severance s3e1`). Every write replies with
+**How the bot knows where seasons end.** The bot never calls TMDB, but the
+app does: whenever it loads a show's details (the library grid, a detail
+sheet, Tonight) it saves that show's shape — episodes per season and the last
+aired episode — on the Pi (`PUT /api/library/:id/seasons`). With that, "next"
+crosses season boundaries properly, a finished show reads **caught up ✓** and
+is never offered by `/tonight`, and `/watched` refuses episodes that don't
+exist or haven't aired (`1899 season 1 has 8 episodes — there's no E9`). If
+an older bot marked phantom episodes, `/where` lists them with the `/unwatch`
+to clear them.
+
+A show you've never opened in the app has no shape yet, so the bot falls back
+to guessing "last + 1 in the same season" and says it's a guess. Opening the
+app once fixes that for every show in your library. Every write replies with
 exactly what changed, and `/unwatch` is the undo.
 
 ## In cinemas
@@ -412,6 +420,7 @@ watch timestamp for the requesting profile — used for the Series sort).
 | POST   | /api/folders (u)                  | `{name, member_ids: [user ids]}` (creator always included) |
 | PUT    | /api/folders/:id/members (u)      | `{member_ids: [...]}` (any member; newcomers get your progress) |
 | DELETE | /api/folders/:id (u)              | —                                                 |
+| PUT    | /api/library/:id/seasons          | `{seasons: [[season, episode_count], ...], last_aired: [s, e] \| null}` (browser-cached TMDB shape, for the bot) |
 | PUT    | /api/folders/:id/items (u)        | `{item_id, member: bool}` (add copies your progress to members) |
 | GET    | /api/feed (u)                     | —                                                 |
 | GET    | /api/inbox (u)                    | — pending quick-captures, newest first            |

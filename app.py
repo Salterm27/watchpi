@@ -110,6 +110,16 @@ CREATE TABLE IF NOT EXISTS folder_activity (
     at        TEXT    NOT NULL
 );
 
+-- Season shape of a series (episode count per season + last aired episode),
+-- cached from TMDB BY THE BROWSER — the Pi still never calls TMDB. It lets
+-- the Telegram bot know where a season ends and when a show is caught up.
+CREATE TABLE IF NOT EXISTS item_seasons (
+    item_id    INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    seasons    TEXT NOT NULL,          -- JSON [[season, episode_count], ...]
+    last_aired TEXT,                   -- JSON [season, episode] or NULL
+    updated_at TEXT NOT NULL
+);
+
 -- Per-user cache of search-tab suggestions. The browser builds them from
 -- TMDB's recommendation endpoints (seeded by the user's folder items) and
 -- stores them here so every device shares one weekly refresh.
@@ -393,8 +403,11 @@ def list_library(user):
              (SELECT MAX(watched_at) FROM episodes e
                WHERE e.item_id = i.id AND e.user_id = :u)          AS last_ep_watched,
              (SELECT watched_at FROM movie_watches m
-               WHERE m.item_id = i.id AND m.user_id = :u)          AS movie_watched_at
+               WHERE m.item_id = i.id AND m.user_id = :u)          AS movie_watched_at,
+             sn.seasons AS sn_seasons, sn.last_aired AS sn_last_aired,
+             sn.updated_at AS sn_updated_at
            FROM items i
+           LEFT JOIN item_seasons sn ON sn.item_id = i.id
            WHERE i.id IN (SELECT item_id FROM item_owners WHERE user_id = :u)
               OR i.id IN (SELECT fi.item_id FROM folder_items fi
                           JOIN folder_members fm ON fm.folder_id = fi.folder_id
@@ -424,6 +437,12 @@ def list_library(user):
         last_watched_at = max(filter(None, [r["last_ep_watched"], r["movie_watched_at"]]), default=None)
         d = item_to_dict(r, r["w"], r["ep_count"], r["st"], last_watched_at)
         d["folders"] = by_item.get(r["id"], [])
+        if r["media_type"] == "tv":
+            d["seasons"] = None if r["sn_seasons"] is None else {
+                "seasons": json.loads(r["sn_seasons"]),
+                "last_aired": json.loads(r["sn_last_aired"]) if r["sn_last_aired"] else None,
+                "updated_at": r["sn_updated_at"],
+            }
         if request.args.get("include") == "episodes":
             d["episodes"] = eps_by_item.get(r["id"], [])
         out.append(d)
@@ -540,6 +559,40 @@ def update_item(item_id, user):
         "SELECT COUNT(*) AS c FROM episodes WHERE item_id=? AND user_id=?", (item_id, user["id"])
     ).fetchone()["c"]
     return jsonify(item_to_dict(row, w, ep_count, st))
+
+
+@app.put("/api/library/<int:item_id>/seasons")
+def set_seasons(item_id):
+    """Cache a series' season shape, as the browser read it from TMDB.
+    Body: {"seasons": [[1, 8], [2, 10]], "last_aired": [2, 3] | null}
+    Show metadata, not progress, so it's shared by every profile."""
+    data = request.get_json(silent=True) or {}
+    seasons, last = data.get("seasons"), data.get("last_aired")
+
+    def pair(p):
+        return (isinstance(p, list) and len(p) == 2
+                and all(isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= 5000
+                        for n in p))
+    if (not isinstance(seasons, list) or len(seasons) > 200
+            or not all(pair(p) and p[0] >= 1 for p in seasons)):
+        return jsonify(error="seasons must be a list of [season >= 1, episode_count]"), 400
+    if last is not None and not pair(last):
+        return jsonify(error="last_aired must be [season, episode] or null"), 400
+    db = get_db()
+    row = db.execute("SELECT media_type FROM items WHERE id=?", (item_id,)).fetchone()
+    if not row:
+        return jsonify(error="not found"), 404
+    if row["media_type"] != "tv":
+        return jsonify(error="only series have seasons"), 400
+    db.execute(
+        """INSERT INTO item_seasons (item_id, seasons, last_aired, updated_at)
+           VALUES (?,?,?,?)
+           ON CONFLICT(item_id) DO UPDATE SET seasons=excluded.seasons,
+             last_aired=excluded.last_aired, updated_at=excluded.updated_at""",
+        (item_id, json.dumps(sorted(seasons)), json.dumps(last) if last else None, now()),
+    )
+    db.commit()
+    return jsonify(ok=True)
 
 
 # ---------------------------------------------------------------- episodes

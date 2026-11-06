@@ -544,3 +544,24 @@ def test_captures_die_with_the_profile(client):
 def test_health(client):
     """The Pi's autodeploy gate polls this to decide whether to roll back."""
     assert client.get("/api/health").get_json() == {"ok": True}
+
+
+def test_seasons_cache_roundtrip_and_validation(client):
+    uid = client.post("/api/users", json={"name": "Ana"}).get_json()["id"]
+    tv = client.post(f"/api/library?user={uid}",
+                     json={"tmdb_id": 90669, "media_type": "tv", "title": "1899"}).get_json()["id"]
+    mv = client.post(f"/api/library?user={uid}",
+                     json={"tmdb_id": 1, "media_type": "movie", "title": "M"}).get_json()["id"]
+    lib = {i["title"]: i for i in client.get(f"/api/library?user={uid}").get_json()}
+    assert lib["1899"]["seasons"] is None and "seasons" not in lib["M"]
+
+    ok = {"seasons": [[1, 8]], "last_aired": [1, 8]}
+    assert client.put(f"/api/library/{tv}/seasons", json=ok).status_code == 200
+    got = {i["title"]: i for i in client.get(f"/api/library?user={uid}").get_json()}["1899"]
+    assert got["seasons"]["seasons"] == [[1, 8]] and got["seasons"]["last_aired"] == [1, 8]
+
+    for bad in ({"seasons": "x"}, {"seasons": [[0, 3]]}, {"seasons": [[1, "8"]]},
+                {"seasons": [[1, 8]], "last_aired": [1]}, {"seasons": [[True, 8]]}):
+        assert client.put(f"/api/library/{tv}/seasons", json=bad).status_code == 400
+    assert client.put(f"/api/library/{mv}/seasons", json=ok).status_code == 400
+    assert client.put("/api/library/9999/seasons", json=ok).status_code == 404

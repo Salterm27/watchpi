@@ -471,6 +471,25 @@ function nextUpAired(d, watchedSet) {
 function watchedSetOf(item) {
   return new Set((item.episodes || []).map(([s, e]) => `${s}:${e}`));
 }
+/* Share a series' season shape (episodes per season + last aired) with the
+   Pi, so the Telegram bot — which never calls TMDB — knows where a season
+   ends and when you're caught up. Sent only when it changed or is >3 days old. */
+function seasonShape(d) {
+  const seasons = (d.seasons || []).filter(s => s.season_number > 0 && s.episode_count > 0)
+    .map(s => [s.season_number, s.episode_count]).sort((a, b) => a[0] - b[0]);
+  const le = d.last_episode_to_air;
+  return { seasons, last_aired: le && le.season_number ? [le.season_number, le.episode_number] : null };
+}
+function rememberSeasons(item, d) {
+  if (!item || item.media_type !== 'tv' || !item.id || !d || !Array.isArray(d.seasons)) return;
+  const shape = seasonShape(d);
+  const cur = item.seasons;
+  const fresh = cur && Date.now() - new Date(cur.updated_at).getTime() < 3 * 86400e3;
+  if (fresh && JSON.stringify([cur.seasons, cur.last_aired]) ===
+               JSON.stringify([shape.seasons, shape.last_aired])) return;
+  item.seasons = { ...shape, updated_at: new Date().toISOString() };
+  api(`/library/${item.id}/seasons`, { method: 'PUT', body: shape }).catch(() => {});
+}
 async function loadFolders() {
   FOLDERS = USER ? await api(`/folders?${userQ()}`) : [];
 }
@@ -703,6 +722,7 @@ async function resolveNextUp(visible) {
       const ck = `tv:${item.tmdb_id}`;
       const d = detailCache[ck] || await tmdb(`/tv/${item.tmdb_id}`, { append_to_response: 'watch/providers' });
       detailCache[ck] = d;
+      rememberSeasons(item, d);
       const next = nextUpAired(d, watchedSetOf(item));
       map.set(item.id, next);
       caughtUpCache[item.tmdb_id] = { watched: item.watched_episodes, caughtUp: next === null };
@@ -718,6 +738,7 @@ async function enrichCard(item, card) {
     const ck = `tv:${item.tmdb_id}`;
     const d = detailCache[ck] || await tmdb(`/tv/${item.tmdb_id}`, { append_to_response: 'watch/providers' });
     detailCache[ck] = d;
+    rememberSeasons(item, d);
     const next = nextUpAired(d, watchedSetOf(item));
     const total = d.number_of_episodes || 0;
     const sub = card.querySelector('.sub');
@@ -860,6 +881,7 @@ async function computeTonightPicks(time, folderId) {
       const ck = `${item.media_type}:${item.tmdb_id}`;
       const d = detailCache[ck] || await tmdb(`/${item.media_type}/${item.tmdb_id}`, { append_to_response: 'watch/providers' });
       detailCache[ck] = d;
+      rememberSeasons(item, d);
       let runtime, info;
       if (item.media_type === 'tv') {
         const next = computeNextUp(d, watchedSetOf(item));
@@ -1427,6 +1449,7 @@ async function openDetail(mediaType, tmdbId, fallbackTitle) {
       ? await rawg(`/games/${tmdbId}`)
       : await tmdb(`/${mediaType}/${tmdbId}`, { append_to_response: 'watch/providers' }));
     detailCache[ck] = d;
+    rememberSeasons(libIndex[ck], d);
   } catch (e) {
     sheet.innerHTML = '<div class="grabber"></div>';
     sheet.appendChild(closeBtn());
@@ -1830,6 +1853,7 @@ async function checkNewEpisodes() {
       const ck = `tv:${s.tmdb_id}`;
       const d = detailCache[ck] || await tmdb(`/tv/${s.tmdb_id}`, { append_to_response: 'watch/providers' });
       detailCache[ck] = d;
+      rememberSeasons(s, d);
       const le = d.last_episode_to_air;
       if (le && le.air_date && le.air_date >= prevDate)
         found.push({ text: `${s.title} S${le.season_number}E${le.episode_number}` });

@@ -58,8 +58,9 @@ HELP = (
     "/unwatch <title> [s2e4] — undo that\n"
     "/whoami — show this chat's id (for setup)\n\n"
     "Without an episode, /watched marks exactly the one /where reported. "
-    "I don't read TMDB, so I can't see where a season ends — if yours just "
-    "did, name the episode (s3e1). I'll always say what I marked."
+    "I learn where seasons end from the app — for a show you haven't opened "
+    "there yet I have to guess, so name the episode (s3e1) if a season just "
+    "ended. I'll always say what I marked."
 )
 
 ALLOWED_UPDATES = json.dumps(["message", "edited_message", "callback_query"])
@@ -138,21 +139,90 @@ def last_watched(item):
     return max(eps) if eps else None
 
 
+def season_map(item):
+    """{season: episode_count} and last aired (s, e), as the app cached them
+    from TMDB — or (None, None) if the app hasn't seen this show yet."""
+    sn = item.get("seasons") or {}
+    if not sn.get("seasons"):
+        return None, None
+    counts = {int(s): int(n) for s, n in sn["seasons"] if n}
+    last = tuple(sn["last_aired"]) if sn.get("last_aired") else None
+    return counts, last
+
+
 def next_up(item):
     """The episode to actually watch next — that's what you want to be told,
-    not the one you already saw. Without TMDB we can't see season boundaries,
-    so this is last+1 in the same season (or the pilot if nothing's watched)."""
+    not the one you already saw. None = caught up on everything aired.
+
+    Uses the season shape the app cached (first unwatched episode, never past
+    the last aired one). Without it we can't see season boundaries, so it
+    falls back to last+1 in the same season (or the pilot)."""
+    counts, last_aired = season_map(item)
+    if counts:
+        seen = {tuple(e) for e in (item.get("episodes") or [])}
+        for s in sorted(counts):
+            for e in range(1, counts[s] + 1):
+                if (s, e) in seen:
+                    continue
+                if last_aired is None or (s, e) > last_aired:
+                    return None                    # only unaired episodes left
+                return s, e
+        return None
     last = last_watched(item)
     return (last[0], last[1] + 1) if last else (1, 1)
 
 
+def episode_problem(item, season, episode):
+    """Why (season, episode) can't be marked watched, or None if it's fine
+    (or we simply don't know the show's shape yet)."""
+    counts, last_aired = season_map(item)
+    if not counts:
+        return None
+    title = item.get("title", "?")
+    if season not in counts:
+        seasons = sorted(counts)
+        return (f"{title} has no season {season} — it has "
+                f"{'season 1' if seasons == [1] else f'seasons {seasons[0]}–{seasons[-1]}'}.")
+    if not 1 <= episode <= counts[season]:
+        return f"{title} season {season} has {counts[season]} episodes — there's no E{episode}."
+    if last_aired and (season, episode) > last_aired:
+        return f"{title} S{season}E{episode} hasn't aired yet."
+    return None
+
+
+def phantom_episodes(item):
+    """Watched episodes that don't exist per the cached seasons — leftovers
+    from before the bot knew where seasons end."""
+    counts, _ = season_map(item)
+    if not counts:
+        return []
+    return sorted(tuple(e) for e in (item.get("episodes") or [])
+                  if not 1 <= e[1] <= counts.get(e[0], 0))
+
+
+def format_where(item):
+    """/where's reply: progress, plus a cleanup hint for phantom episodes."""
+    out = format_progress(item)
+    ghosts = phantom_episodes(item)
+    if ghosts:
+        names = ", ".join(f"S{s}E{e}" for s, e in ghosts[:5])
+        s, e = ghosts[0]
+        out += (f"\n⚠ Marked but not real episodes: {names} — "
+                f"/unwatch {item.get('title', '')} s{s}e{e}")
+    return out
+
+
 def plan_mark(item, episode):
-    """(season, episode, was_guess) for /watched. No explicit episode marks
-    exactly the one /where reported, so the two commands never disagree."""
+    """(season, episode, was_guess) for /watched, or None when caught up.
+    No explicit episode marks exactly the one /where reported, so the two
+    commands never disagree. It's only a *guess* when the app hasn't cached
+    the show's seasons yet."""
     if episode:
         return episode[0], episode[1], False
-    s, e = next_up(item)
-    return s, e, True
+    nxt = next_up(item)
+    if nxt is None:
+        return None
+    return nxt[0], nxt[1], season_map(item)[0] is None
 
 
 def format_progress(item):
@@ -162,8 +232,11 @@ def format_progress(item):
     if item.get("media_type") in ("movie", "game"):
         state = "✓ watched" if item.get("watched") else "not watched yet"
         return f"{title} — {state}{flag}"
-    s, e = next_up(item)
+    nxt = next_up(item)
     n = item.get("watched_episodes") or 0
+    if nxt is None:
+        return f"{title} — caught up ✓ · {n} watched{flag}"
+    s, e = nxt
     if not n:
         return f"{title} — next S{s}E{e} (not started){flag}"
     return f"{title} — next S{s}E{e} · {n} watched{flag}"
@@ -188,11 +261,12 @@ def tonight_candidates(items, folder_id=None):
     first), then unwatched movies (newest added first), then shows you
     haven't started. Deterministic, so a reroll is just 'the next index'.
 
-    Without TMDB the bot can't tell a caught-up show from one with more to
-    watch — same honest limit as /where."""
+    Caught-up shows are skipped once the app has cached their seasons; a
+    show the app hasn't seen yet can't be told apart, same as /where."""
     pool = [i for i in items
             if i.get("media_type") in ("tv", "movie") and not i.get("stopped")
             and not (i.get("media_type") == "movie" and i.get("watched"))
+            and not (i.get("media_type") == "tv" and next_up(i) is None)
             and (folder_id is None or folder_id in (i.get("folders") or []))]
 
     def rank(i):
@@ -211,7 +285,7 @@ def format_tonight(item, scope_label):
     if item.get("media_type") == "movie":
         line = "Movie · not watched yet"
     else:
-        s, e = next_up(item)
+        s, e = next_up(item)        # caught-up shows never get here
         n = item.get("watched_episodes") or 0
         line = f"Next up S{s}E{e}" + (f" · {n} watched" if n else " · not started")
     return f"🌙 Tonight: {item.get('title', '?')}\n{line}\nfrom {scope_label}"
@@ -506,7 +580,16 @@ def do_mark(chat_id, user_id, intent):
     if item.get("media_type") != "tv":
         send(chat_id, f"{item['title']} isn't a series — mark it in the app.")
         return
-    season, episode, guessed = plan_mark(item, intent["episode"])
+    plan = plan_mark(item, intent["episode"])
+    if intent["watched"]:
+        if plan is None:
+            send(chat_id, f"You're caught up on {item['title']} — nothing aired to mark.")
+            return
+        problem = episode_problem(item, plan[0], plan[1])
+        if problem:                   # never record an episode that doesn't exist
+            send(chat_id, problem)
+            return
+    season, episode, guessed = plan or (0, 0, False)
     if not intent["watched"] and not intent["episode"]:
         last = last_watched(item)                 # /unwatch with no episode = undo last
         if not last:
@@ -519,8 +602,9 @@ def do_mark(chat_id, user_id, intent):
     if res.get("synced"):
         msg += " · synced with your folder"
     if guessed:
-        msg += (f"\n(the one /where reported — if season {season} actually ended, "
-                f"/unwatch and try /watched {intent['query']} s{season + 1}e1)")
+        msg += (f"\n(a guess — I don't know {item['title']}'s seasons until you open it "
+                f"in the app. If season {season} actually ended, /unwatch and try "
+                f"/watched {intent['query']} s{season + 1}e1)")
     send(chat_id, msg)
 
 
@@ -547,7 +631,7 @@ def handle(update, chats):
             do_tonight(chat_id, user_id, payload)
         elif kind == "progress":
             item, err = resolve(user_id, payload)
-            send(chat_id, err or format_progress(item))
+            send(chat_id, err or format_where(item))
         elif kind == "mark":
             do_mark(chat_id, user_id, payload)
     except Exception as e:

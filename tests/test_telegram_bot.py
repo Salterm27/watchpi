@@ -271,3 +271,61 @@ def test_callback_of():
                               "message": {"message_id": 5, "chat": {"id": 111}}}}
     assert bot.callback_of(upd) == (111, 5, "q1", "tn:all:0")
     assert bot.callback_of(msg(111, "hi")) is None
+
+
+# ---------------------------------------------------------------- season shape
+# 1899: one season of 8 episodes. The bug: with 8 watched the bot said
+# "next S1E9" and happily marked E9 and E10, which don't exist.
+
+def show_1899(watched, seasons=((1, 8),), last_aired=(1, 8)):
+    return {"title": "1899", "media_type": "tv",
+            "episodes": [list(e) for e in watched], "watched_episodes": len(watched),
+            "seasons": {"seasons": [list(s) for s in seasons],
+                        "last_aired": list(last_aired) if last_aired else None}}
+
+
+def test_next_up_stops_at_the_end_of_the_show():
+    assert bot.next_up(show_1899([(1, e) for e in range(1, 8)])) == (1, 8)
+    assert bot.next_up(show_1899([(1, e) for e in range(1, 9)])) is None
+
+
+def test_next_up_crosses_into_the_next_season():
+    item = show_1899([(1, e) for e in range(1, 9)], seasons=((1, 8), (2, 6)), last_aired=(2, 6))
+    assert bot.next_up(item) == (2, 1)
+
+
+def test_next_up_never_points_at_an_unaired_episode():
+    item = show_1899([(1, 1), (1, 2)], seasons=((1, 8),), last_aired=(1, 2))
+    assert bot.next_up(item) is None
+
+
+def test_next_up_falls_back_to_a_guess_without_season_data():
+    item = {"title": "X", "media_type": "tv", "episodes": [[1, 8]]}
+    assert bot.next_up(item) == (1, 9)
+    assert bot.plan_mark(item, None) == (1, 9, True)
+
+
+def test_plan_mark_is_not_a_guess_with_season_data():
+    assert bot.plan_mark(show_1899([(1, 1)]), None) == (1, 2, False)
+    assert bot.plan_mark(show_1899([(1, e) for e in range(1, 9)]), None) is None
+
+
+def test_episode_problem_rejects_episodes_that_dont_exist():
+    item = show_1899([])
+    assert bot.episode_problem(item, 1, 8) is None
+    assert "8 episodes" in bot.episode_problem(item, 1, 9)
+    assert "no season 2" in bot.episode_problem(item, 2, 1)
+    assert "hasn't aired" in bot.episode_problem(show_1899([], last_aired=(1, 4)), 1, 5)
+    assert bot.episode_problem({"title": "X"}, 9, 99) is None     # unknown shape
+
+
+def test_caught_up_show_is_not_offered_tonight():
+    done = show_1899([(1, e) for e in range(1, 9)])
+    assert bot.tonight_candidates([done]) == []
+    assert "caught up" in bot.format_progress(done)
+
+
+def test_where_flags_phantom_episodes():
+    item = show_1899([(1, e) for e in range(1, 11)])
+    out = bot.format_where(item)
+    assert "caught up" in out and "S1E9, S1E10" in out and "/unwatch 1899 s1e9" in out
